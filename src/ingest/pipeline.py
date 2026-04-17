@@ -51,13 +51,23 @@ POLL_INTERVAL = int(os.environ.get("PATHWAY_POLL_INTERVAL_SECS", "30"))
 STATE_DIR = os.environ.get("PATHWAY_STATE_DIR", "/var/pathway/state")
 
 VECTOR_DIM = 1536  # text-embedding-3-small output dimension
+# text-embedding-3-small max input: 8191 tokens (~4 chars/token).
+# Truncate to stay under limit; for production use a chunking pass.
+_MAX_EMBED_CHARS = 30_000  # ≈ 7500 tokens — safe margin for the 8191-token limit
 
 _openai_client = OpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_BASE_URL)
 
 
 @pw.udf
 def embed_text(text: str) -> list:
-    """Embed a single text chunk using the configured OpenAI-compatible endpoint."""
+    """Embed a single text chunk using the configured OpenAI-compatible endpoint.
+
+    Truncates input to _MAX_EMBED_CHARS to stay within text-embedding-3-small's
+    8191-token limit. OpenRouter returns data:[] (not an HTTP error) for over-limit
+    inputs, which the openai client surfaces as ValueError('No embedding data received').
+    """
+    if len(text) > _MAX_EMBED_CHARS:
+        text = text[:_MAX_EMBED_CHARS]
     resp = _openai_client.embeddings.create(input=text, model=EMBEDDING_MODEL)
     return resp.data[0].embedding
 
