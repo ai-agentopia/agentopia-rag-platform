@@ -1,6 +1,6 @@
 # agentopia-rag-platform — Migration Sequencing Decision
 
-> Status: Phase RB.3 — awaiting CTO approval  
+> Status: Approved — CTO sign-off 2026-04-17 (rag-platform#4)  
 > Reference: [migration-plan.md §1.5](https://github.com/ai-agentopia/docs/blob/main/rag/migration-plan.md)
 
 ---
@@ -82,8 +82,8 @@ Rationale: Pathway replaces the orchestrator/normalizer entirely; no value in po
 
 | Item | Status |
 |---|---|
-| Recommended sequencing confirmed | ⬜ Awaiting CTO sign-off |
-| Lift-and-refactor approach confirmed | ⬜ Awaiting CTO sign-off |
-| Deprecation timeline confirmed | ⬜ Awaiting CTO sign-off |
+| Recommended sequencing confirmed | ✅ Approved 2026-04-17 |
+| Lift-and-refactor approach confirmed | ✅ Approved 2026-04-17 |
+| Deprecation timeline confirmed | ✅ Approved 2026-04-17 |
 
-_CTO approval: close issue rag-platform#4 once sign-off is given._
+_CTO approval recorded 2026-04-17. Issue rag-platform#4 closed._
