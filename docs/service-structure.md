@@ -1,6 +1,6 @@
 # agentopia-rag-platform — Service Structure
 
-> Status: Bootstrap (Phase RB.2)
+> Status: Approved — CTO sign-off 2026-04-17 (rag-platform#3)
 
 ---
 
