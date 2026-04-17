@@ -22,7 +22,7 @@ import hashlib
 import os
 
 import pathway as pw
-from pathway.xpacks.llm.embedders import OpenAIEmbedder
+from openai import OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
@@ -51,6 +51,15 @@ POLL_INTERVAL = int(os.environ.get("PATHWAY_POLL_INTERVAL_SECS", "30"))
 STATE_DIR = os.environ.get("PATHWAY_STATE_DIR", "/var/pathway/state")
 
 VECTOR_DIM = 1536  # text-embedding-3-small output dimension
+
+_openai_client = OpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_BASE_URL)
+
+
+@pw.udf
+def embed_text(text: str) -> list:
+    """Embed a single text chunk using the configured OpenAI-compatible endpoint."""
+    resp = _openai_client.embeddings.create(input=text, model=EMBEDDING_MODEL)
+    return resp.data[0].embedding
 
 
 # ---------------------------------------------------------------------------
@@ -144,15 +153,9 @@ def build_pipeline() -> None:
     )
 
     # -- Transform: embed each document chunk ---------------------------------
-    embedder = OpenAIEmbedder(
-        api_key=EMBEDDING_API_KEY,
-        model=EMBEDDING_MODEL,
-        api_base=EMBEDDING_BASE_URL,
-    )
-
     embedded = documents.select(
         **documents,
-        embedding=embedder(pw.this.text),
+        embedding=embed_text(pw.this.text),
     )
 
     # -- Sink: Qdrant upsert --------------------------------------------------
