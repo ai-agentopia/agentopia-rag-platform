@@ -1,0 +1,101 @@
+{
+  "version": "1.0",
+  "phase": "p3",
+  "scope": "utop/oddspark",
+  "collection": "kb-45294aa854667d3b",
+  "description": "P3.6 retrieval eval gate — 10 queries grounded in the live utop/oddspark corpus (architecture/ prefix, 16 markdown documents, chunked by Pathway pipeline). Document-level relevance judgments: matching on document_id (S3 key). Grading scale 0-2.",
+  "grading_scale": {
+    "0": "irrelevant — chunk is from a document that does not address the query",
+    "1": "partially relevant — chunk is from a document with related but indirect information",
+    "2": "fully relevant — chunk is from a document that directly answers the query"
+  },
+  "matching_strategy": "document_id — a retrieved chunk is graded by its parent document's relevance to the query, not by exact chunk_index. This is appropriate for document-level retrieval quality gating on a corpus where each document covers a coherent topic.",
+  "samples": [
+    {
+      "id": "p3-01",
+      "query": "How does the A2A protocol compare between BeeAI framework and Agentopia implementations?",
+      "scenario": "factual_comparison",
+      "relevant_documents": [
+        {"document_id": "architecture/a2a-comparison.md", "relevance": 2, "reason": "Directly compares BeeAI vs Agentopia A2A implementations"},
+        {"document_id": "architecture/a2a-full-design.md", "relevance": 1, "reason": "Covers Agentopia A2A design but not BeeAI comparison"}
+      ]
+    },
+    {
+      "id": "p3-02",
+      "query": "How does the multi-bot memory architecture work with shared knowledge and isolated identities?",
+      "scenario": "architecture_explanation",
+      "relevant_documents": [
+        {"document_id": "architecture/architecture-multiple-bot.md", "relevance": 2, "reason": "Directly addresses multi-bot memory architecture with shared/isolated concepts"},
+        {"document_id": "architecture/chatbot-architecture.md", "relevance": 1, "reason": "General chatbot architecture with memory references"}
+      ]
+    },
+    {
+      "id": "p3-03",
+      "query": "What retrieval strategy was chosen for the Super RAG system and what alternatives were considered?",
+      "scenario": "design_decision",
+      "relevant_documents": [
+        {"document_id": "architecture/super-rag-debate.md", "relevance": 2, "reason": "CTO debate session covering retrieval strategy options and decisions"},
+        {"document_id": "architecture/super-rag-blueprint.md", "relevance": 2, "reason": "Blueprint with recommended retrieval stack"}
+      ]
+    },
+    {
+      "id": "p3-04",
+      "query": "How does the automated code review workflow enforce quality gates on pull requests?",
+      "scenario": "process_explanation",
+      "relevant_documents": [
+        {"document_id": "architecture/governed-pr-review-workflow.md", "relevance": 2, "reason": "Directly describes the governed PR review workflow"},
+        {"document_id": "architecture/reviewer-remediation.md", "relevance": 1, "reason": "Covers reviewer remediation which is related but not the core workflow"}
+      ]
+    },
+    {
+      "id": "p3-05",
+      "query": "What is the dual-lane interaction model in the Agentopia platform architecture?",
+      "scenario": "architecture_concept",
+      "relevant_documents": [
+        {"document_id": "architecture/overview.md", "relevance": 2, "reason": "Architecture overview that defines the dual-lane interaction model"}
+      ]
+    },
+    {
+      "id": "p3-06",
+      "query": "How does the deterministic delivery pipeline start and execute tasks?",
+      "scenario": "process_explanation",
+      "relevant_documents": [
+        {"document_id": "architecture/p0.5-deterministic-delivery-start.md", "relevance": 2, "reason": "Directly describes the deterministic delivery start process"}
+      ]
+    },
+    {
+      "id": "p3-07",
+      "query": "What are the implementation phases for the production-ready A2A solution protocol?",
+      "scenario": "planning_detail",
+      "relevant_documents": [
+        {"document_id": "architecture/a2a-solution-protocol.md", "relevance": 2, "reason": "Contains the A2A solution protocol with implementation phases"},
+        {"document_id": "architecture/a2a-improvement-plan.md", "relevance": 2, "reason": "A2A improvement plan with phased implementation"}
+      ]
+    },
+    {
+      "id": "p3-08",
+      "query": "How does the worker pool handle routing improvements for task distribution?",
+      "scenario": "architecture_detail",
+      "relevant_documents": [
+        {"document_id": "architecture/worker-pool-routing-improvement-plan.md", "relevance": 2, "reason": "Directly addresses worker pool routing improvements"}
+      ]
+    },
+    {
+      "id": "p3-09",
+      "query": "How are conflicts resolved when multiple review systems coexist in the codebase?",
+      "scenario": "process_explanation",
+      "relevant_documents": [
+        {"document_id": "architecture/reviewer-coexistence.md", "relevance": 2, "reason": "Directly addresses reviewer coexistence and conflict resolution"},
+        {"document_id": "architecture/reviewer-remediation.md", "relevance": 1, "reason": "Related remediation process for reviewers"}
+      ]
+    },
+    {
+      "id": "p3-10",
+      "query": "What are the execution authorization requirements and gate criteria for P1?",
+      "scenario": "gate_criteria",
+      "relevant_documents": [
+        {"document_id": "architecture/p1-execution-authorization.md", "relevance": 2, "reason": "Directly specifies P1 execution authorization requirements"}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,705 @@
+{
+  "phase": "p3",
+  "type": "pilot_gate",
+  "timestamp": "20260418T042351Z",
+  "scope": "utop/oddspark",
+  "collection": "kb-45294aa854667d3b",
+  "dataset": "/tmp/eval/datasets/p3_pilot_gate.json",
+  "matching_strategy": "document_id \u2014 a retrieved chunk is graded by its parent document's relevance to the query, not by exact chunk_index. This is appropriate for document-level retrieval quality gating on a corpus where each document covers a coherent topic.",
+  "k": 5,
+  "sample_count": 10,
+  "aggregates": {
+    "ndcg": {
+      "mean": 0.941,
+      "min": 0.6934,
+      "max": 1.0,
+      "count": 10
+    },
+    "mrr": {
+      "mean": 0.95,
+      "min": 0.5,
+      "max": 1.0,
+      "count": 10
+    },
+    "precision": {
+      "mean": 0.74,
+      "min": 0.2,
+      "max": 1.0,
+      "count": 10
+    },
+    "recall": {
+      "mean": 2.35,
+      "min": 1.0,
+      "max": 5.0,
+      "count": 10
+    }
+  },
+  "per_query": [
+    {
+      "id": "p3-01",
+      "query": "How does the A2A protocol compare between BeeAI framework and Agentopia implementations?",
+      "scenario": "factual_comparison",
+      "relevances": [
+        2.0,
+        2.0,
+        2.0,
+        2.0,
+        2.0
+      ],
+      "metrics": {
+        "ndcg": 1.0,
+        "mrr": 1.0,
+        "precision": 1.0,
+        "recall": 2.5
+      },
+      "detail": [
+        {
+          "rank": 1,
+          "document_id": "architecture/a2a-comparison.md",
+          "section": "A2A Implementation Comparison: BeeAI Framework vs Agentopia",
+          "chunk_index": 1,
+          "score": 0.8646,
+          "relevance_grade": 2,
+          "text_preview": "# A2A Implementation Comparison: BeeAI Framework vs Agentopia\n\n> Date: 2026-03-1"
+        },
+        {
+          "rank": 2,
+          "document_id": "architecture/a2a-comparison.md",
+          "section": "",
+          "chunk_index": 0,
+          "score": 0.8528,
+          "relevance_grade": 2,
+          "text_preview": "---\ntitle: \"A2A Implementation Comparison: BeeAI Framework vs Agentopia\"\n---"
+        },
+        {
+          "rank": 3,
+          "document_id": "architecture/a2a-comparison.md",
+          "section": "1. Overview",
+          "chunk_index": 2,
+          "score": 0.7863,
+          "relevance_grade": 2,
+          "text_preview": "## 1. Overview\n\nBoth projects implement the A2A protocol using the official Linu"
+        },
+        {
+          "rank": 4,
+          "document_id": "architecture/a2a-comparison.md",
+          "section": "11. Conclusion",
+          "chunk_index": 32,
+          "score": 0.7423,
+          "relevance_grade": 2,
+          "text_preview": "## 11. Conclusion\n\n**BeeAI strengths in A2A:**\n- gRPC transport for high-perform"
+        },
+        {
+          "rank": 5,
+          "document_id": "architecture/a2a-comparison.md",
+          "section": "2.3 Transport Protocols",
+          "chunk_index": 6,
+          "score": 0.7132,
+          "relevance_grade": 2,
+          "text_preview": "### 2.3 Transport Protocols\n\n| Transport | BeeAI | Agentopia |\n|---|---|---|\n| J"
+        }
+      ],
+      "total_relevant": 2
+    },
+    {
+      "id": "p3-02",
+      "query": "How does the multi-bot memory architecture work with shared knowledge and isolated identities?",
+      "scenario": "architecture_explanation",
+      "relevances": [
+        2.0,
+        1.0,
+        2.0,
+        2.0,
+        2.0
+      ],
+      "metrics": {
+        "ndcg": 0.9557,
+        "mrr": 1.0,
+        "precision": 1.0,
+        "recall": 2.5
+      },
+      "detail": [
+        {
+          "rank": 1,
+          "document_id": "architecture/architecture-multiple-bot.md",
+          "section": "Memory Architecture",
+          "chunk_index": 2,
+          "score": 0.7059,
+          "relevance_grade": 2,
+          "text_preview": "## Memory Architecture\n\nAgentopia uses a three-layer memory model that balances "
+        },
+        {
+          "rank": 2,
+          "document_id": "architecture/chatbot-architecture.md",
+          "section": "Memory Architecture",
+          "chunk_index": 6,
+          "score": 0.6693,
+          "relevance_grade": 1,
+          "text_preview": "## Memory Architecture\n\nAgentopia uses a three-layer memory system to give bots "
+        },
+        {
+          "rank": 3,
+          "document_id": "architecture/architecture-multiple-bot.md",
+          "section": "Bot Isolation and Sharing",
+          "chunk_index": 8,
+          "score": 0.6664,
+          "relevance_grade": 2,
+          "text_preview": "## Bot Isolation and Sharing\n\nEach bot operates in its own workspace with its ow"
+        },
+        {
+          "rank": 4,
+          "document_id": "architecture/architecture-multiple-bot.md",
+          "section": "",
+          "chunk_index": 0,
+          "score": 0.6657,
+          "relevance_grade": 2,
+          "text_preview": "---\ntitle: \"Multi-Bot Architecture\"\ndescription: \"How Agentopia orchestrates mul"
+        },
+        {
+          "rank": 5,
+          "document_id": "architecture/architecture-multiple-bot.md",
+          "section": "Layer 2 -- Knowledge (shared, persistent)",
+          "chunk_index": 4,
+          "score": 0.6114,
+          "relevance_grade": 2,
+          "text_preview": "### Layer 2 -- Knowledge (shared, persistent)\n\nAll bots share a common knowledge"
+        }
+      ],
+      "total_relevant": 2
+    },
+    {
+      "id": "p3-03",
+      "query": "What retrieval strategy was chosen for the Super RAG system and what alternatives were considered?",
+      "scenario": "design_decision",
+      "relevances": [
+        2.0,
+        2.0,
+        2.0,
+        2.0,
+        2.0
+      ],
+      "metrics": {
+        "ndcg": 1.0,
+        "mrr": 1.0,
+        "precision": 1.0,
+        "recall": 2.5
+      },
+      "detail": [
+        {
+          "rank": 1,
+          "document_id": "architecture/super-rag-blueprint.md",
+          "section": "1.5 RAG System \u2014 Retrieval Strategy",
+          "chunk_index": 7,
+          "score": 0.6313,
+          "relevance_grade": 2,
+          "text_preview": "### 1.5 RAG System \u2014 Retrieval Strategy\n\n| Blueprint Requirement | Current State"
+        },
+        {
+          "rank": 2,
+          "document_id": "architecture/super-rag-debate.md",
+          "section": "G. Decision Summary",
+          "chunk_index": 35,
+          "score": 0.5639,
+          "relevance_grade": 2,
+          "text_preview": "## G. Decision Summary\n\n| Decision | Verdict | Evidence Type |\n|---|---|---|\n| P"
+        },
+        {
+          "rank": 3,
+          "document_id": "architecture/super-rag-debate.md",
+          "section": "H1. Industry Standard Pipeline",
+          "chunk_index": 37,
+          "score": 0.5415,
+          "relevance_grade": 2,
+          "text_preview": "### H1. Industry Standard Pipeline\n\nProduction RAG has converged on three stages"
+        },
+        {
+          "rank": 4,
+          "document_id": "architecture/super-rag-blueprint.md",
+          "section": "6. Decision Points for CTO",
+          "chunk_index": 26,
+          "score": 0.5306,
+          "relevance_grade": 2,
+          "text_preview": "## 6. Decision Points for CTO\n\n1. **Phase 1 scope**: How many golden query-answe"
+        },
+        {
+          "rank": 5,
+          "document_id": "architecture/super-rag-debate.md",
+          "section": "Explicit Deferrals",
+          "chunk_index": 20,
+          "score": 0.5263,
+          "relevance_grade": 2,
+          "text_preview": "### Explicit Deferrals\n\n| Item | Reason | Revisit When |\n|---|---|---|\n| **Graph"
+        }
+      ],
+      "total_relevant": 2
+    },
+    {
+      "id": "p3-04",
+      "query": "How does the automated code review workflow enforce quality gates on pull requests?",
+      "scenario": "process_explanation",
+      "relevances": [
+        2.0,
+        0.0,
+        2.0,
+        1.0,
+        1.0
+      ],
+      "metrics": {
+        "ndcg": 0.9106,
+        "mrr": 1.0,
+        "precision": 0.8,
+        "recall": 2.0
+      },
+      "detail": [
+        {
+          "rank": 1,
+          "document_id": "architecture/governed-pr-review-workflow.md",
+          "section": "",
+          "chunk_index": 0,
+          "score": 0.6247,
+          "relevance_grade": 2,
+          "text_preview": "---\ntitle: \"Automated Code Review Workflow\"\ndescription: \"How Agentopia's bot-ba"
+        },
+        {
+          "rank": 2,
+          "document_id": "architecture/overview.md",
+          "section": "Reviewer",
+          "chunk_index": 11,
+          "score": 0.5694,
+          "relevance_grade": 0,
+          "text_preview": "### Reviewer\nInspects code quality. Can review pull requests, submit structured "
+        },
+        {
+          "rank": 3,
+          "document_id": "architecture/governed-pr-review-workflow.md",
+          "section": "How It Works",
+          "chunk_index": 1,
+          "score": 0.5691,
+          "relevance_grade": 2,
+          "text_preview": "## How It Works\n\nWhen a pull request is opened or updated, the platform receives"
+        },
+        {
+          "rank": 4,
+          "document_id": "architecture/reviewer-remediation.md",
+          "section": "What Works",
+          "chunk_index": 27,
+          "score": 0.5607,
+          "relevance_grade": 1,
+          "text_preview": "### What Works\n\n- Bot reliably posts GitHub reviews (APPROVE / REQUEST_CHANGES)\n"
+        },
+        {
+          "rank": 5,
+          "document_id": "architecture/reviewer-remediation.md",
+          "section": "Overview",
+          "chunk_index": 2,
+          "score": 0.5336,
+          "relevance_grade": 1,
+          "text_preview": "## Overview\n\nThe governed PR review workflow extends beyond finding-only review "
+        }
+      ],
+      "total_relevant": 2
+    },
+    {
+      "id": "p3-05",
+      "query": "What is the dual-lane interaction model in the Agentopia platform architecture?",
+      "scenario": "architecture_concept",
+      "relevances": [
+        2.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "metrics": {
+        "ndcg": 1.0,
+        "mrr": 1.0,
+        "precision": 0.2,
+        "recall": 1.0
+      },
+      "detail": [
+        {
+          "rank": 1,
+          "document_id": "architecture/overview.md",
+          "section": "Dual-Lane Interaction Model",
+          "chunk_index": 2,
+          "score": 0.7237,
+          "relevance_grade": 2,
+          "text_preview": "## Dual-Lane Interaction Model\n\nThe platform supports two distinct interaction m"
+        },
+        {
+          "rank": 2,
+          "document_id": "architecture/p1-execution-authorization.md",
+          "section": "Dual-Lane Model",
+          "chunk_index": 6,
+          "score": 0.5862,
+          "relevance_grade": 0,
+          "text_preview": "## Dual-Lane Model\n\nThe system operates in two semantic lanes:\n\n**Lane A -- Cons"
+        },
+        {
+          "rank": 3,
+          "document_id": "architecture/architecture-multiple-bot.md",
+          "section": "Memory Architecture",
+          "chunk_index": 2,
+          "score": 0.5668,
+          "relevance_grade": 0,
+          "text_preview": "## Memory Architecture\n\nAgentopia uses a three-layer memory model that balances "
+        },
+        {
+          "rank": 4,
+          "document_id": "architecture/a2a-full-design.md",
+          "section": "",
+          "chunk_index": 0,
+          "score": 0.5645,
+          "relevance_grade": 0,
+          "text_preview": "---\ntitle: \"Agent-to-Agent Protocol\"\ndescription: \"How Agentopia agents discover"
+        },
+        {
+          "rank": 5,
+          "document_id": "architecture/architecture-multiple-bot.md",
+          "section": "",
+          "chunk_index": 0,
+          "score": 0.5618,
+          "relevance_grade": 0,
+          "text_preview": "---\ntitle: \"Multi-Bot Architecture\"\ndescription: \"How Agentopia orchestrates mul"
+        }
+      ],
+      "total_relevant": 1
+    },
+    {
+      "id": "p3-06",
+      "query": "How does the deterministic delivery pipeline start and execute tasks?",
+      "scenario": "process_explanation",
+      "relevances": [
+        0.0,
+        2.0,
+        2.0,
+        0.0,
+        0.0
+      ],
+      "metrics": {
+        "ndcg": 0.6934,
+        "mrr": 0.5,
+        "precision": 0.4,
+        "recall": 2.0
+      },
+      "detail": [
+        {
+          "rank": 1,
+          "document_id": "architecture/overview.md",
+          "section": "Delivery Lifecycle",
+          "chunk_index": 6,
+          "score": 0.5281,
+          "relevance_grade": 0,
+          "text_preview": "## Delivery Lifecycle\n\nWhen an operator submits a delivery objective, the platfo"
+        },
+        {
+          "rank": 2,
+          "document_id": "architecture/p0.5-deterministic-delivery-start.md",
+          "section": "",
+          "chunk_index": 0,
+          "score": 0.5116,
+          "relevance_grade": 2,
+          "text_preview": "---\ntitle: \"Deterministic Delivery Start Front Door\"\n---"
+        },
+        {
+          "rank": 3,
+          "document_id": "architecture/p0.5-deterministic-delivery-start.md",
+          "section": "1. Problem Statement",
+          "chunk_index": 2,
+          "score": 0.4958,
+          "relevance_grade": 2,
+          "text_preview": "## 1. Problem Statement\n\nThere is an upstream gap before workflow start that P1 "
+        },
+        {
+          "rank": 4,
+          "document_id": "architecture/a2a-solution-protocol.md",
+          "section": "7. Autonomous Delivery Lifecycle",
+          "chunk_index": 15,
+          "score": 0.4948,
+          "relevance_grade": 0,
+          "text_preview": "## 7. Autonomous Delivery Lifecycle\n\n```mermaid\nsequenceDiagram\n    participant "
+        },
+        {
+          "rank": 5,
+          "document_id": "architecture/overview.md",
+          "section": "Execution Boundaries",
+          "chunk_index": 5,
+          "score": 0.4699,
+          "relevance_grade": 0,
+          "text_preview": "## Execution Boundaries\n\nThree boundaries ensure that code-modifying operations "
+        }
+      ],
+      "total_relevant": 1
+    },
+    {
+      "id": "p3-07",
+      "query": "What are the implementation phases for the production-ready A2A solution protocol?",
+      "scenario": "planning_detail",
+      "relevances": [
+        2.0,
+        2.0,
+        2.0,
+        2.0,
+        2.0
+      ],
+      "metrics": {
+        "ndcg": 1.0,
+        "mrr": 1.0,
+        "precision": 1.0,
+        "recall": 2.5
+      },
+      "detail": [
+        {
+          "rank": 1,
+          "document_id": "architecture/a2a-improvement-plan.md",
+          "section": "A2A Improvement Plan: Production-Ready A2A-First Architecture",
+          "chunk_index": 1,
+          "score": 0.7276,
+          "relevance_grade": 2,
+          "text_preview": "# A2A Improvement Plan: Production-Ready A2A-First Architecture\n\n> **Status**: P"
+        },
+        {
+          "rank": 2,
+          "document_id": "architecture/a2a-improvement-plan.md",
+          "section": "1. Problem Statement",
+          "chunk_index": 2,
+          "score": 0.6365,
+          "relevance_grade": 2,
+          "text_preview": "## 1. Problem Statement\n\nThe A2A implementation is now **A2A-first** with produc"
+        },
+        {
+          "rank": 3,
+          "document_id": "architecture/a2a-improvement-plan.md",
+          "section": "",
+          "chunk_index": 0,
+          "score": 0.6238,
+          "relevance_grade": 2,
+          "text_preview": "---\ntitle: \"A2A Improvement Plan: Production-Ready A2A-First Architecture\"\n---"
+        },
+        {
+          "rank": 4,
+          "document_id": "architecture/a2a-improvement-plan.md",
+          "section": "Phase 2 (production hardening) \u2014 ALL DONE",
+          "chunk_index": 25,
+          "score": 0.5927,
+          "relevance_grade": 2,
+          "text_preview": "### Phase 2 (production hardening) \u2014 ALL DONE\n\n```\nStep 2.1  a2a_protocol/task_s"
+        },
+        {
+          "rank": 5,
+          "document_id": "architecture/a2a-improvement-plan.md",
+          "section": "3. Phase 1: A2A-First Transport",
+          "chunk_index": 4,
+          "score": 0.5469,
+          "relevance_grade": 2,
+          "text_preview": "## 3. Phase 1: A2A-First Transport"
+        }
+      ],
+      "total_relevant": 2
+    },
+    {
+      "id": "p3-08",
+      "query": "How does the worker pool handle routing improvements for task distribution?",
+      "scenario": "architecture_detail",
+      "relevances": [
+        2.0,
+        2.0,
+        2.0,
+        2.0,
+        2.0
+      ],
+      "metrics": {
+        "ndcg": 1.0,
+        "mrr": 1.0,
+        "precision": 1.0,
+        "recall": 5.0
+      },
+      "detail": [
+        {
+          "rank": 1,
+          "document_id": "architecture/worker-pool-routing-improvement-plan.md",
+          "section": "",
+          "chunk_index": 0,
+          "score": 0.6484,
+          "relevance_grade": 2,
+          "text_preview": "---\ntitle: \"Worker Pool Routing Improvement Plan\"\n---\n\n\n**Status**: Improvement "
+        },
+        {
+          "rank": 2,
+          "document_id": "architecture/worker-pool-routing-improvement-plan.md",
+          "section": "Less ambiguity in multi-worker teams",
+          "chunk_index": 12,
+          "score": 0.5735,
+          "relevance_grade": 2,
+          "text_preview": "### Less ambiguity in multi-worker teams\n\nWithout capability-aware routing, oper"
+        },
+        {
+          "rank": 3,
+          "document_id": "architecture/worker-pool-routing-improvement-plan.md",
+          "section": "Phase 3 \u2014 Eligible-subset routing",
+          "chunk_index": 19,
+          "score": 0.5603,
+          "relevance_grade": 2,
+          "text_preview": "### Phase 3 \u2014 Eligible-subset routing\n\nConnect packet classification to worker c"
+        },
+        {
+          "rank": 4,
+          "document_id": "architecture/worker-pool-routing-improvement-plan.md",
+          "section": "8. Success Criteria",
+          "chunk_index": 23,
+          "score": 0.5276,
+          "relevance_grade": 2,
+          "text_preview": "## 8. Success Criteria\n\nThe routing improvement plan is successful when:\n\n- Fron"
+        },
+        {
+          "rank": 5,
+          "document_id": "architecture/worker-pool-routing-improvement-plan.md",
+          "section": "5. Design Principles",
+          "chunk_index": 15,
+          "score": 0.5146,
+          "relevance_grade": 2,
+          "text_preview": "## 5. Design Principles\n\n1. **Explicit capability modeling.** Worker capabilitie"
+        }
+      ],
+      "total_relevant": 1
+    },
+    {
+      "id": "p3-09",
+      "query": "How are conflicts resolved when multiple review systems coexist in the codebase?",
+      "scenario": "process_explanation",
+      "relevances": [
+        2.0,
+        2.0,
+        2.0,
+        0.0,
+        0.0
+      ],
+      "metrics": {
+        "ndcg": 1.0,
+        "mrr": 1.0,
+        "precision": 0.6,
+        "recall": 1.5
+      },
+      "detail": [
+        {
+          "rank": 1,
+          "document_id": "architecture/reviewer-coexistence.md",
+          "section": "Reviewer Coexistence Model",
+          "chunk_index": 1,
+          "score": 0.5596,
+          "relevance_grade": 2,
+          "text_preview": "# Reviewer Coexistence Model\n\n> How Agentopia separates workflow reviewers from "
+        },
+        {
+          "rank": 2,
+          "document_id": "architecture/reviewer-coexistence.md",
+          "section": "",
+          "chunk_index": 0,
+          "score": 0.5344,
+          "relevance_grade": 2,
+          "text_preview": "---\ntitle: \"Reviewer Coexistence Model\"\n---"
+        },
+        {
+          "rank": 3,
+          "document_id": "architecture/reviewer-coexistence.md",
+          "section": "3. Coexistence Guarantee",
+          "chunk_index": 9,
+          "score": 0.5339,
+          "relevance_grade": 2,
+          "text_preview": "## 3. Coexistence Guarantee\n\nWhen both reviewer types are active:\n\n```\nRoleRegis"
+        },
+        {
+          "rank": 4,
+          "document_id": "architecture/governed-pr-review-workflow.md",
+          "section": "Architecture Summary",
+          "chunk_index": 7,
+          "score": 0.5103,
+          "relevance_grade": 0,
+          "text_preview": "## Architecture Summary\n\nThe workflow separates concerns into two planes:\n\n**Pla"
+        },
+        {
+          "rank": 5,
+          "document_id": "architecture/governed-pr-review-workflow.md",
+          "section": "Reviewer Bot",
+          "chunk_index": 2,
+          "score": 0.5035,
+          "relevance_grade": 0,
+          "text_preview": "## Reviewer Bot\n\nThe reviewer bot is the execution actor. It receives a structur"
+        }
+      ],
+      "total_relevant": 2
+    },
+    {
+      "id": "p3-10",
+      "query": "What are the execution authorization requirements and gate criteria for P1?",
+      "scenario": "gate_criteria",
+      "relevances": [
+        2.0,
+        0.0,
+        0.0,
+        0.0,
+        2.0
+      ],
+      "metrics": {
+        "ndcg": 0.8503,
+        "mrr": 1.0,
+        "precision": 0.4,
+        "recall": 2.0
+      },
+      "detail": [
+        {
+          "rank": 1,
+          "document_id": "architecture/p1-execution-authorization.md",
+          "section": "",
+          "chunk_index": 0,
+          "score": 0.4733,
+          "relevance_grade": 2,
+          "text_preview": "---\ntitle: \"Execution Authorization\"\ndescription: \"Dual-lane security model that"
+        },
+        {
+          "rank": 2,
+          "document_id": "architecture/super-rag-debate.md",
+          "section": "5. Minimum production-ready eval gate?",
+          "chunk_index": 33,
+          "score": 0.4733,
+          "relevance_grade": 0,
+          "text_preview": "### 5. Minimum production-ready eval gate?\n\n**Phase 1a** (RAGAS directional sign"
+        },
+        {
+          "rank": 3,
+          "document_id": "architecture/p0.5-deterministic-delivery-start.md",
+          "section": "7. Relationship To P1",
+          "chunk_index": 13,
+          "score": 0.4732,
+          "relevance_grade": 0,
+          "text_preview": "## 7. Relationship To P1\n\n| Milestone | Scope | Dependency |\n|---|---|---|\n| **P"
+        },
+        {
+          "rank": 4,
+          "document_id": "architecture/p0.5-deterministic-delivery-start.md",
+          "section": "Deterministic Delivery Start Front Door",
+          "chunk_index": 1,
+          "score": 0.4545,
+          "relevance_grade": 0,
+          "text_preview": "# Deterministic Delivery Start Front Door\n\n> Status: CLOSED/DEFERRED \u2014 C2 reject"
+        },
+        {
+          "rank": 5,
+          "document_id": "architecture/p1-execution-authorization.md",
+          "section": "Authorization Matrix",
+          "chunk_index": 4,
+          "score": 0.4452,
+          "relevance_grade": 2,
+          "text_preview": "## Authorization Matrix\n\n| Action Class | Execution Class Required | Role Requir"
+        }
+      ],
+      "total_relevant": 1
+    }
+  ],
+  "gate": {
+    "threshold": 0.9,
+    "baseline_reference": 0.925,
+    "ndcg_mean": 0.941,
+    "passed": true
+  }
+}
