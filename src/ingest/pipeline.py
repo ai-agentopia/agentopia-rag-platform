@@ -6,6 +6,7 @@ Reads documents from S3, chunks + embeds them, and upserts into Qdrant.
 All configuration is via environment variables (set from K8s Secrets):
   QDRANT_URL           — e.g. http://qdrant:6333
   QDRANT_COLLECTION    — target collection name, e.g. kb-<scope_hash>
+  SCOPE_IDENTITY       — human-readable scope, e.g. utop/oddspark (default: QDRANT_COLLECTION)
   S3_BUCKET_NAME       — source S3 bucket
   S3_PREFIX            — object prefix to poll, e.g. scopes/{scope}/
   S3_REGION            — AWS region
@@ -20,6 +21,7 @@ All configuration is via environment variables (set from K8s Secrets):
 
 import hashlib
 import os
+import time as _time
 
 import pathway as pw
 from openai import OpenAI
@@ -49,6 +51,10 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
 
 POLL_INTERVAL = int(os.environ.get("PATHWAY_POLL_INTERVAL_SECS", "30"))
 STATE_DIR = os.environ.get("PATHWAY_STATE_DIR", "/var/pathway/state")
+# Human-readable scope identity stored in Qdrant payload (e.g. "utop/oddspark").
+# Defaults to QDRANT_COLLECTION (collection hash) if not explicitly set.
+# Set SCOPE_IDENTITY to the source scope for correct gateway retrieval filtering.
+SCOPE_IDENTITY = os.environ.get("SCOPE_IDENTITY", QDRANT_COLLECTION)
 
 VECTOR_DIM = 1536  # text-embedding-3-small output dimension
 # text-embedding-3-small max input: 8191 tokens (~4 chars/token).
@@ -70,6 +76,17 @@ def embed_text(text: str) -> list:
         text = text[:_MAX_EMBED_CHARS]
     resp = _openai_client.embeddings.create(input=text, model=EMBEDDING_MODEL)
     return resp.data[0].embedding
+
+
+@pw.udf
+def extract_path(meta: dict) -> str:
+    """Extract the S3 object key from Pathway _metadata as a plain string.
+
+    pw.this._metadata["path"] returns a Pathway ColumnReference that serialises
+    as {"_value": "..."} when passed directly through select(). This UDF unwraps
+    the value so document_id and section_path are stored as strings in Qdrant.
+    """
+    return meta.get("path", "")
 
 
 # ---------------------------------------------------------------------------
@@ -117,10 +134,21 @@ class QdrantSink(pw.io.python.ConnectorObserver):
                         vector=row["embedding"],
                         payload={
                             "document_id": row.get("document_id", ""),
-                            "scope": QDRANT_COLLECTION,
+                            "scope": SCOPE_IDENTITY,
                             "section_path": row.get("section_path", ""),
                             "text": row.get("text", ""),
                             "status": "active",
+                            # document_hash: SHA-256 of stored text — enables deduplication
+                            # and change detection without re-fetching from S3.
+                            "document_hash": hashlib.sha256(
+                                row.get("text", "").encode()
+                            ).hexdigest(),
+                            # ingested_at: wall-clock Unix timestamp (seconds) when this
+                            # chunk was written to Qdrant. Pathway's `time` parameter is a
+                            # logical batch epoch in ms (autocommit_duration_ms cycles) —
+                            # NOT wall-clock time. _time.time() is the correct source for
+                            # freshness lag measurement (P3.5).
+                            "ingested_at": _time.time(),
                         },
                     )
                 ],
@@ -156,10 +184,12 @@ def build_pipeline() -> None:
     )
 
     # -- Transform: derive document_id and section_path from S3 object key ----
+    # extract_path UDF unwraps pw.this._metadata to a plain string.
+    # Direct pw.this._metadata["path"] serialises as {"_value": "..."} (dict bug).
     documents = documents.select(
         text=pw.this.data,
-        document_id=pw.this._metadata["path"],
-        section_path=pw.this._metadata["path"],
+        document_id=extract_path(pw.this._metadata),
+        section_path=extract_path(pw.this._metadata),
     )
 
     # -- Transform: embed each document chunk ---------------------------------
