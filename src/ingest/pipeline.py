@@ -64,7 +64,7 @@ VECTOR_DIM = 1536  # text-embedding-3-small output dimension
 _MAX_EMBED_CHARS = 30_000  # ≈ 7500 tokens — fallback ceiling if a chunk is unexpectedly large
 
 # Chunking parameters.
-# Primary split: markdown H1/H2/H3 headers.
+# Primary split: markdown H1/H2/H3 headers (detected outside fenced code blocks).
 # Fallback: bounded windows with overlap for sections exceeding _CHUNK_MAX_CHARS.
 _CHUNK_MAX_CHARS = 8_000   # ≈ 2000 tokens — ceiling per chunk, well under embedding limit
 _CHUNK_OVERLAP_CHARS = 200  # overlap between window sub-chunks for context continuity
@@ -110,7 +110,7 @@ def _chunk_markdown(text: str) -> list:
     # inside code blocks (e.g. "# python_var", "# shell comment") are ignored.
     in_fence = False
     fence_marker = ""
-    header_positions: list[tuple[int, str]] = []  # (char_offset, title)
+    header_positions: list = []  # [(char_offset, title), ...]
     pos = 0
 
     for line in text.splitlines(keepends=True):
@@ -129,7 +129,7 @@ def _chunk_markdown(text: str) -> list:
         pos += len(line)
 
     # Build (section_title, section_text) pairs from detected header positions
-    sections: list[tuple[str, str]] = []
+    sections: list = []
     if not header_positions:
         # No headers — treat the entire document as a single unnamed section.
         sections = [("", text)]
@@ -146,7 +146,7 @@ def _chunk_markdown(text: str) -> list:
                 sections.append((title, section_text))
 
     # Sub-split any section that exceeds the per-chunk ceiling
-    chunks: list[dict] = []
+    chunks: list = []
     for section_title, section_text in sections:
         if len(section_text) <= _CHUNK_MAX_CHARS:
             chunks.append({"section": section_title, "text": section_text})
@@ -178,10 +178,11 @@ def _chunk_markdown(text: str) -> list:
 def chunk_text(text: str) -> list:
     """Pathway UDF: split one document into a list of chunk dicts."""
     if not isinstance(text, str):
-        # Coerce bytes or pw.Json in case Pathway delivers a non-str type.
         try:
-            text = _unwrap_json(text)
-        except Exception:
+            s = str(text)
+            d = json.loads(s)
+            text = d if isinstance(d, str) else s
+        except (json.JSONDecodeError, ValueError):
             text = str(text)
     return _chunk_markdown(text)
 
@@ -191,20 +192,31 @@ def chunk_text(text: str) -> list:
 # ---------------------------------------------------------------------------
 
 @pw.udf
-def embed_text(text: str) -> list:
-    """Embed a single text chunk using the configured OpenAI-compatible endpoint.
+def embed_chunk(chunk) -> list:
+    """Embed a single chunk dict (pw.Json from flatten output).
+
+    Receives one chunk dict per row after flatten().  The dict may arrive as
+    a plain Python dict (Pathway deserialises pw.Json for UDFs) or as a
+    pw.Json object — both forms are handled defensively.
 
     After sub-document chunking, chunk sizes are well below _MAX_EMBED_CHARS
     in normal operation.  The truncation guard remains as a safety net for
     unexpectedly large sections or malformed input.
-
-    text may arrive as pw.Json (extracted from chunk dict columns); the
-    _unwrap_json path normalises it to a plain Python str before embedding.
     """
-    if not isinstance(text, str):
-        text = _unwrap_json(text)
+    # Deserialise chunk dict — it arrives as Python dict when Pathway
+    # deserialises the pw.Json column, but handle raw pw.Json defensively.
+    if isinstance(chunk, dict):
+        text = str(chunk.get("text", ""))
+    else:
+        try:
+            d = json.loads(str(chunk))
+            text = str(d.get("text", "")) if isinstance(d, dict) else str(d)
+        except (json.JSONDecodeError, ValueError):
+            text = str(chunk)
+
     if len(text) > _MAX_EMBED_CHARS:
         text = text[:_MAX_EMBED_CHARS]
+
     resp = _openai_client.embeddings.create(input=text, model=EMBEDDING_MODEL)
     return resp.data[0].embedding
 
@@ -249,15 +261,22 @@ def _unwrap_json(val: object) -> str:
     return s
 
 
-def _unwrap_int(val: object, default: int = 0) -> int:
-    """Unwrap a pw.Json integer column value to a plain Python int."""
-    if isinstance(val, int):
+def _unwrap_chunk_dict(val: object) -> dict:
+    """Extract a Python dict from a pw.Json chunk column in on_change.
+
+    After flatten(), the chunk column (pw.Json) arrives in on_change as
+    either a plain Python dict (Pathway deserialises for ConnectorObserver)
+    or as a pw.Json object whose str() is a JSON-encoded dict.
+    """
+    if isinstance(val, dict):
         return val
+    if val is None:
+        return {}
     try:
-        parsed = json.loads(str(val))
-        return int(parsed)
-    except (json.JSONDecodeError, ValueError, TypeError):
-        return default
+        d = json.loads(str(val))
+        return d if isinstance(d, dict) else {}
+    except (json.JSONDecodeError, ValueError):
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -306,9 +325,14 @@ class QdrantSink(pw.io.python.ConnectorObserver):
     ) -> None:
         point_id = self._row_id(key)
         if is_addition:
-            # All string fields may arrive as pw.Json — _unwrap_json normalises.
-            # Integer fields (chunk_index, total_chunks) use _unwrap_int.
-            chunk_text = _unwrap_json(row.get("text", ""))
+            # chunk column contains the full chunk dict (pw.Json).
+            # _unwrap_chunk_dict handles both Python-dict and pw.Json-object forms.
+            chunk = _unwrap_chunk_dict(row.get("chunk"))
+            chunk_text = str(chunk.get("text", ""))
+            section = str(chunk.get("section", ""))
+            chunk_index = int(chunk.get("chunk_index", 0))
+            total_chunks = int(chunk.get("total_chunks", 1))
+
             self._client.upsert(
                 collection_name=self._collection,
                 points=[
@@ -319,9 +343,9 @@ class QdrantSink(pw.io.python.ConnectorObserver):
                             "document_id": _unwrap_json(row.get("document_id")),
                             "scope": SCOPE_IDENTITY,
                             "section_path": _unwrap_json(row.get("section_path")),
-                            "section": _unwrap_json(row.get("section", "")),
-                            "chunk_index": _unwrap_int(row.get("chunk_index", 0)),
-                            "total_chunks": _unwrap_int(row.get("total_chunks", 1)),
+                            "section": section,
+                            "chunk_index": chunk_index,
+                            "total_chunks": total_chunks,
                             "text": chunk_text,
                             "status": "active",
                             # document_hash: SHA-256 of this chunk's text — enables
@@ -383,9 +407,20 @@ def build_pipeline() -> None:
     # chunk_text() returns list[dict] (section, text, chunk_index, total_chunks).
     # flatten() expands that list so each chunk becomes its own Pathway row.
     # After flatten, pw.this.chunks is one chunk dict (pw.Json) per row.
-    # Pathway's compound row key after flatten is (original_doc_key, list_index),
-    # which ensures stable point identity and correct retraction-per-chunk when
-    # a source document is deleted or updated.
+    #
+    # Row identity design:
+    # Pathway assigns compound row keys (original_doc_key + list_position) after
+    # flatten().  This means each chunk's Qdrant point ID is stable per
+    # (document, chunk_index).  When a source document is deleted or updated,
+    # Pathway retracts all derived chunk rows — QdrantSink.on_change receives
+    # is_addition=False for each chunk and deletes the corresponding point.
+    #
+    # Important: Pathway 0.30.0 does not support string-key indexing on pw.Json
+    # columns in select() expressions (only integer indexing on arrays).  To
+    # avoid this limitation, the full chunk dict is passed as a single column
+    # ("chunk") to the sink and embedded via embed_chunk().  Field extraction
+    # (section, chunk_index, total_chunks, text) happens inside the UDF and
+    # inside on_change(), where plain Python dict access is available.
     documents_with_chunks = documents.select(
         chunks=chunk_text(pw.this.text),
         document_id=pw.this.document_id,
@@ -394,19 +429,14 @@ def build_pipeline() -> None:
 
     chunk_rows = documents_with_chunks.flatten(pw.this.chunks)
 
-    chunk_rows = chunk_rows.select(
-        text=chunk_rows.chunks["text"],
-        section=chunk_rows.chunks["section"],
-        chunk_index=chunk_rows.chunks["chunk_index"],
-        total_chunks=chunk_rows.chunks["total_chunks"],
+    # -- Transform: embed each chunk ------------------------------------------
+    # embed_chunk() receives the full chunk dict (pw.Json) and extracts the
+    # "text" field internally to avoid pw.Json string-key indexing in the graph.
+    embedded = chunk_rows.select(
+        chunk=pw.this.chunks,
         document_id=pw.this.document_id,
         section_path=pw.this.section_path,
-    )
-
-    # -- Transform: embed each chunk ------------------------------------------
-    embedded = chunk_rows.select(
-        **chunk_rows,
-        embedding=embed_text(pw.this.text),
+        embedding=embed_chunk(pw.this.chunks),
     )
 
     # -- Sink: Qdrant upsert --------------------------------------------------
