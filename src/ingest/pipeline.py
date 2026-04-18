@@ -78,20 +78,19 @@ def embed_text(text: str) -> list:
     return resp.data[0].embedding
 
 
-@pw.udf
-def extract_path(path: str) -> str:
-    """Return the S3 object key as a plain Python string.
+def _unwrap_json(val: object) -> str:
+    """Unwrap a Pathway Json column value from its ConnectorObserver row form.
 
-    pw.this._metadata["path"] in select() keeps a Pathway-internal wrapper type
-    that serialises as {"_value": "..."} when read in on_change rows. Passing it
-    through this UDF (with `path: str` annotation) forces Pathway to evaluate and
-    unwrap the value to a plain str at the UDF boundary.
-
-    Note: the parameter is pw.this._metadata["path"] (the path field), NOT the
-    whole _metadata dict. Passing the whole _metadata produces a Json object that
-    has no `.get()` method — that is the bug this UDF avoids.
+    When a pw.Json-typed column (e.g. pw.this._metadata["path"]) is observed
+    via pw.io.python.ConnectorObserver, Pathway serialises primitive values as
+    {"_value": actual_value} in the on_change row dict. This helper extracts
+    the actual string, handling both the wrapped and plain-string cases.
     """
-    return path
+    if isinstance(val, dict) and "_value" in val:
+        return str(val["_value"])
+    if val is None:
+        return ""
+    return str(val)
 
 
 # ---------------------------------------------------------------------------
@@ -138,9 +137,9 @@ class QdrantSink(pw.io.python.ConnectorObserver):
                         id=point_id,
                         vector=row["embedding"],
                         payload={
-                            "document_id": row.get("document_id", ""),
+                            "document_id": _unwrap_json(row.get("document_id")),
                             "scope": SCOPE_IDENTITY,
-                            "section_path": row.get("section_path", ""),
+                            "section_path": _unwrap_json(row.get("section_path")),
                             "text": row.get("text", ""),
                             "status": "active",
                             # document_hash: SHA-256 of stored text — enables deduplication
@@ -189,13 +188,13 @@ def build_pipeline() -> None:
     )
 
     # -- Transform: derive document_id and section_path from S3 object key ----
-    # extract_path UDF takes _metadata["path"] (str), not the full _metadata dict.
-    # Without the UDF, _metadata["path"] in select() retains an internal wrapper
-    # type that serialises as {"_value": "..."} in on_change rows.
+    # pw.this._metadata["path"] produces a pw.Json-typed column. When delivered
+    # to ConnectorObserver.on_change it arrives as {"_value": "s3/key.md"}.
+    # _unwrap_json() in on_change extracts the plain string from that wrapper.
     documents = documents.select(
         text=pw.this.data,
-        document_id=extract_path(pw.this._metadata["path"]),
-        section_path=extract_path(pw.this._metadata["path"]),
+        document_id=pw.this._metadata["path"],
+        section_path=pw.this._metadata["path"],
     )
 
     # -- Transform: embed each document chunk ---------------------------------
