@@ -82,12 +82,20 @@ def _unwrap_json(val: object) -> str:
     """Unwrap a Pathway Json column value from its ConnectorObserver row form.
 
     When a pw.Json-typed column (e.g. pw.this._metadata["path"]) is observed
-    via pw.io.python.ConnectorObserver, Pathway serialises primitive values as
-    {"_value": actual_value} in the on_change row dict. This helper extracts
-    the actual string, handling both the wrapped and plain-string cases.
+    via pw.io.python.ConnectorObserver, Pathway serialises the value as:
+        {"_value": json_encoded_value}
+    where json_encoded_value is the JSON representation of the primitive. For
+    strings, this means the _value field contains the string WITH surrounding
+    double-quote characters (e.g. '"architecture/chatbot-architecture.md"').
+    This helper extracts and unquotes the actual plain string.
     """
     if isinstance(val, dict) and "_value" in val:
-        return str(val["_value"])
+        inner = val["_value"]
+        # Strip JSON string quotes: Pathway JSON-encodes string values in _value,
+        # so a path "architecture/foo.md" is stored as '"architecture/foo.md"'.
+        if isinstance(inner, str) and len(inner) >= 2 and inner[0] == '"' and inner[-1] == '"':
+            return inner[1:-1]
+        return str(inner) if inner is not None else ""
     if val is None:
         return ""
     return str(val)
