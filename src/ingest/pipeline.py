@@ -22,6 +22,7 @@ All configuration is via environment variables (set from K8s Secrets):
 import hashlib
 import json
 import os
+import re
 import time as _time
 
 import pathway as pw
@@ -59,25 +60,158 @@ SCOPE_IDENTITY = os.environ.get("SCOPE_IDENTITY", QDRANT_COLLECTION)
 
 VECTOR_DIM = 1536  # text-embedding-3-small output dimension
 # text-embedding-3-small max input: 8191 tokens (~4 chars/token).
-# Truncate to stay under limit; for production use a chunking pass.
-_MAX_EMBED_CHARS = 30_000  # ≈ 7500 tokens — safe margin for the 8191-token limit
+# Safety-net truncation guard — normal operation should not hit this after chunking.
+_MAX_EMBED_CHARS = 30_000  # ≈ 7500 tokens — fallback ceiling if a chunk is unexpectedly large
+
+# Chunking parameters.
+# Primary split: markdown H1/H2/H3 headers.
+# Fallback: bounded windows with overlap for sections exceeding _CHUNK_MAX_CHARS.
+_CHUNK_MAX_CHARS = 8_000   # ≈ 2000 tokens — ceiling per chunk, well under embedding limit
+_CHUNK_OVERLAP_CHARS = 200  # overlap between window sub-chunks for context continuity
 
 _openai_client = OpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_BASE_URL)
 
+# ---------------------------------------------------------------------------
+# Markdown chunking
+# ---------------------------------------------------------------------------
+
+def _chunk_markdown(text: str) -> list:
+    """Split a markdown document into sub-document chunks.
+
+    Primary strategy: split at H1 / H2 / H3 header boundaries so each
+    section becomes its own chunk.  This preserves semantic coherence for
+    structured markdown documents (the corpus standard for utop/oddspark).
+
+    Headers are detected line-by-line with fenced code block tracking so
+    that Python/shell comment lines inside code blocks (e.g. "# variable")
+    are never mistaken for markdown headers.
+
+    Fallback: when a section exceeds _CHUNK_MAX_CHARS (e.g. a dense code
+    block or very long prose section), the section is subdivided into
+    overlapping fixed-size windows using _CHUNK_OVERLAP_CHARS of overlap
+    to maintain context continuity across the boundary.
+
+    Each returned dict has:
+      text         — chunk text (includes the header line when split at header)
+      section      — header title string (stripped of leading '#'), or "" for
+                     preamble text before the first header
+      chunk_index  — 0-based index of this chunk within the document
+      total_chunks — total number of chunks for this document
+    """
+    if not isinstance(text, str):
+        # S3 plaintext_by_object delivers str; guard against unexpected bytes.
+        try:
+            text = text.decode("utf-8", errors="replace")
+        except AttributeError:
+            text = str(text)
+
+    # Scan line-by-line, tracking fenced code blocks.
+    # Headers (H1-H3) are only matched outside fences so that comment lines
+    # inside code blocks (e.g. "# python_var", "# shell comment") are ignored.
+    in_fence = False
+    fence_marker = ""
+    header_positions: list[tuple[int, str]] = []  # (char_offset, title)
+    pos = 0
+
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if not in_fence:
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_fence = True
+                fence_marker = stripped[:3]
+            else:
+                m = re.match(r'^(#{1,3}) (.+)', line)
+                if m:
+                    header_positions.append((pos, m.group(2).strip()))
+        else:
+            if stripped.startswith(fence_marker):
+                in_fence = False
+        pos += len(line)
+
+    # Build (section_title, section_text) pairs from detected header positions
+    sections: list[tuple[str, str]] = []
+    if not header_positions:
+        # No headers — treat the entire document as a single unnamed section.
+        sections = [("", text)]
+    else:
+        # Preamble before the first header
+        if header_positions[0][0] > 0:
+            preamble = text[:header_positions[0][0]].strip()
+            if preamble:
+                sections.append(("", preamble))
+        for i, (hpos, title) in enumerate(header_positions):
+            end = header_positions[i + 1][0] if i + 1 < len(header_positions) else len(text)
+            section_text = text[hpos:end].strip()
+            if section_text:
+                sections.append((title, section_text))
+
+    # Sub-split any section that exceeds the per-chunk ceiling
+    chunks: list[dict] = []
+    for section_title, section_text in sections:
+        if len(section_text) <= _CHUNK_MAX_CHARS:
+            chunks.append({"section": section_title, "text": section_text})
+        else:
+            start = 0
+            while start < len(section_text):
+                window = section_text[start:start + _CHUNK_MAX_CHARS]
+                if window.strip():
+                    chunks.append({"section": section_title, "text": window})
+                next_start = start + _CHUNK_MAX_CHARS - _CHUNK_OVERLAP_CHARS
+                if next_start <= start:
+                    break
+                start = next_start
+
+    if not chunks:
+        # Absolute fallback: emit a single chunk with truncated content.
+        chunks = [{"section": "", "text": text[:_CHUNK_MAX_CHARS]}]
+
+    # Annotate with positional metadata
+    total = len(chunks)
+    for i, chunk in enumerate(chunks):
+        chunk["chunk_index"] = i
+        chunk["total_chunks"] = total
+
+    return chunks
+
+
+@pw.udf
+def chunk_text(text: str) -> list:
+    """Pathway UDF: split one document into a list of chunk dicts."""
+    if not isinstance(text, str):
+        # Coerce bytes or pw.Json in case Pathway delivers a non-str type.
+        try:
+            text = _unwrap_json(text)
+        except Exception:
+            text = str(text)
+    return _chunk_markdown(text)
+
+
+# ---------------------------------------------------------------------------
+# Embedding
+# ---------------------------------------------------------------------------
 
 @pw.udf
 def embed_text(text: str) -> list:
     """Embed a single text chunk using the configured OpenAI-compatible endpoint.
 
-    Truncates input to _MAX_EMBED_CHARS to stay within text-embedding-3-small's
-    8191-token limit. OpenRouter returns data:[] (not an HTTP error) for over-limit
-    inputs, which the openai client surfaces as ValueError('No embedding data received').
+    After sub-document chunking, chunk sizes are well below _MAX_EMBED_CHARS
+    in normal operation.  The truncation guard remains as a safety net for
+    unexpectedly large sections or malformed input.
+
+    text may arrive as pw.Json (extracted from chunk dict columns); the
+    _unwrap_json path normalises it to a plain Python str before embedding.
     """
+    if not isinstance(text, str):
+        text = _unwrap_json(text)
     if len(text) > _MAX_EMBED_CHARS:
         text = text[:_MAX_EMBED_CHARS]
     resp = _openai_client.embeddings.create(input=text, model=EMBEDDING_MODEL)
     return resp.data[0].embedding
 
+
+# ---------------------------------------------------------------------------
+# JSON unwrapping helpers
+# ---------------------------------------------------------------------------
 
 def _unwrap_json(val: object) -> str:
     """Unwrap a Pathway Json column value from its ConnectorObserver row form.
@@ -115,15 +249,34 @@ def _unwrap_json(val: object) -> str:
     return s
 
 
+def _unwrap_int(val: object, default: int = 0) -> int:
+    """Unwrap a pw.Json integer column value to a plain Python int."""
+    if isinstance(val, int):
+        return val
+    try:
+        parsed = json.loads(str(val))
+        return int(parsed)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return default
+
+
 # ---------------------------------------------------------------------------
 # Qdrant sink
 # ---------------------------------------------------------------------------
 
 class QdrantSink(pw.io.python.ConnectorObserver):
-    """Upserts embeddings into a Qdrant collection.
+    """Upserts chunk embeddings into a Qdrant collection.
 
-    Handles addition and retraction (deletion) events from Pathway's
-    differential dataflow, preserving the single-publisher invariant.
+    Each Qdrant point represents one sub-document chunk.  Pathway's
+    differential dataflow ensures correct retraction (deletion) semantics:
+    when a source document is deleted or updated, all chunk rows derived
+    from that document are retracted by Pathway, and on_change is called
+    with is_addition=False for each chunk — triggering the corresponding
+    Qdrant deletes automatically.
+
+    Point identity is stable per (document, chunk_index): Pathway's flatten
+    operation assigns each chunk a compound row key (original_doc_key +
+    list_position), which _row_id maps to a stable 63-bit Qdrant point ID.
     """
 
     def __init__(self, url: str, collection: str) -> None:
@@ -140,7 +293,8 @@ class QdrantSink(pw.io.python.ConnectorObserver):
             )
 
     def _row_id(self, key: pw.Pointer) -> int:
-        # Pathway Pointer → stable 63-bit int suitable for Qdrant point ID
+        # Pathway Pointer (compound after flatten: doc_key + chunk_index position)
+        # → stable 63-bit int suitable for Qdrant point ID.
         return int(hashlib.sha256(str(key).encode()).hexdigest(), 16) % (2**63)
 
     def on_change(
@@ -152,6 +306,9 @@ class QdrantSink(pw.io.python.ConnectorObserver):
     ) -> None:
         point_id = self._row_id(key)
         if is_addition:
+            # All string fields may arrive as pw.Json — _unwrap_json normalises.
+            # Integer fields (chunk_index, total_chunks) use _unwrap_int.
+            chunk_text = _unwrap_json(row.get("text", ""))
             self._client.upsert(
                 collection_name=self._collection,
                 points=[
@@ -162,12 +319,15 @@ class QdrantSink(pw.io.python.ConnectorObserver):
                             "document_id": _unwrap_json(row.get("document_id")),
                             "scope": SCOPE_IDENTITY,
                             "section_path": _unwrap_json(row.get("section_path")),
-                            "text": row.get("text", ""),
+                            "section": _unwrap_json(row.get("section", "")),
+                            "chunk_index": _unwrap_int(row.get("chunk_index", 0)),
+                            "total_chunks": _unwrap_int(row.get("total_chunks", 1)),
+                            "text": chunk_text,
                             "status": "active",
-                            # document_hash: SHA-256 of stored text — enables deduplication
-                            # and change detection without re-fetching from S3.
+                            # document_hash: SHA-256 of this chunk's text — enables
+                            # chunk-level deduplication and change detection.
                             "document_hash": hashlib.sha256(
-                                row.get("text", "").encode()
+                                chunk_text.encode()
                             ).hexdigest(),
                             # ingested_at: wall-clock Unix timestamp (seconds) when this
                             # chunk was written to Qdrant. Pathway's `time` parameter is a
@@ -219,9 +379,33 @@ def build_pipeline() -> None:
         section_path=pw.this._metadata["path"],
     )
 
-    # -- Transform: embed each document chunk ---------------------------------
-    embedded = documents.select(
-        **documents,
+    # -- Transform: chunk each document into sub-document pieces --------------
+    # chunk_text() returns list[dict] (section, text, chunk_index, total_chunks).
+    # flatten() expands that list so each chunk becomes its own Pathway row.
+    # After flatten, pw.this.chunks is one chunk dict (pw.Json) per row.
+    # Pathway's compound row key after flatten is (original_doc_key, list_index),
+    # which ensures stable point identity and correct retraction-per-chunk when
+    # a source document is deleted or updated.
+    documents_with_chunks = documents.select(
+        chunks=chunk_text(pw.this.text),
+        document_id=pw.this.document_id,
+        section_path=pw.this.section_path,
+    )
+
+    chunk_rows = documents_with_chunks.flatten(pw.this.chunks)
+
+    chunk_rows = chunk_rows.select(
+        text=chunk_rows.chunks["text"],
+        section=chunk_rows.chunks["section"],
+        chunk_index=chunk_rows.chunks["chunk_index"],
+        total_chunks=chunk_rows.chunks["total_chunks"],
+        document_id=pw.this.document_id,
+        section_path=pw.this.section_path,
+    )
+
+    # -- Transform: embed each chunk ------------------------------------------
+    embedded = chunk_rows.select(
+        **chunk_rows,
         embedding=embed_text(pw.this.text),
     )
 
