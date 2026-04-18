@@ -79,14 +79,19 @@ def embed_text(text: str) -> list:
 
 
 @pw.udf
-def extract_path(meta: dict) -> str:
-    """Extract the S3 object key from Pathway _metadata as a plain string.
+def extract_path(path: str) -> str:
+    """Return the S3 object key as a plain Python string.
 
-    pw.this._metadata["path"] returns a Pathway ColumnReference that serialises
-    as {"_value": "..."} when passed directly through select(). This UDF unwraps
-    the value so document_id and section_path are stored as strings in Qdrant.
+    pw.this._metadata["path"] in select() keeps a Pathway-internal wrapper type
+    that serialises as {"_value": "..."} when read in on_change rows. Passing it
+    through this UDF (with `path: str` annotation) forces Pathway to evaluate and
+    unwrap the value to a plain str at the UDF boundary.
+
+    Note: the parameter is pw.this._metadata["path"] (the path field), NOT the
+    whole _metadata dict. Passing the whole _metadata produces a Json object that
+    has no `.get()` method — that is the bug this UDF avoids.
     """
-    return meta.get("path", "")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -184,12 +189,13 @@ def build_pipeline() -> None:
     )
 
     # -- Transform: derive document_id and section_path from S3 object key ----
-    # extract_path UDF unwraps pw.this._metadata to a plain string.
-    # Direct pw.this._metadata["path"] serialises as {"_value": "..."} (dict bug).
+    # extract_path UDF takes _metadata["path"] (str), not the full _metadata dict.
+    # Without the UDF, _metadata["path"] in select() retains an internal wrapper
+    # type that serialises as {"_value": "..."} in on_change rows.
     documents = documents.select(
         text=pw.this.data,
-        document_id=extract_path(pw.this._metadata),
-        section_path=extract_path(pw.this._metadata),
+        document_id=extract_path(pw.this._metadata["path"]),
+        section_path=extract_path(pw.this._metadata["path"]),
     )
 
     # -- Transform: embed each document chunk ---------------------------------
