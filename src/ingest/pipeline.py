@@ -20,6 +20,7 @@ All configuration is via environment variables (set from K8s Secrets):
 """
 
 import hashlib
+import json
 import os
 import time as _time
 
@@ -81,26 +82,37 @@ def embed_text(text: str) -> list:
 def _unwrap_json(val: object) -> str:
     """Unwrap a Pathway Json column value from its ConnectorObserver row form.
 
-    Pathway may deliver pw.Json-typed columns in two forms depending on version:
-      Form A — dict wrapper:  {"_value": json_encoded_value}
-      Form B — plain string:  '"architecture/chatbot-architecture.md"'
-                               (the raw JSON encoding, quotes included)
+    Pathway delivers pw.Json-typed columns (e.g. pw.this._metadata["path"]) as
+    one of three forms in on_change row dicts:
+      Form A — dict wrapper:  {"_value": '"path/to/file.md"'}
+      Form B — plain str:     '"path/to/file.md"'  (raw JSON text, Python str type)
+      Form C — pw.Json obj:   str(val) == '"path/to/file.md"'  (not a plain str/dict)
 
-    In both cases the JSON encoding of a string value includes surrounding
-    double-quote characters that must be stripped to obtain the plain path.
+    In all cases str(val) produces the JSON-encoded representation of the value,
+    so json.loads(str(val)) is the correct canonical decoder.  Form A is handled
+    via the dict branch for safety; Forms B and C fall through to json.loads.
     """
     if isinstance(val, dict) and "_value" in val:
+        # Form A: unwrap the _value key, then json-decode to strip JSON encoding.
         inner = val["_value"]
-        # Strip JSON string quotes from dict-wrapped form.
-        if isinstance(inner, str) and len(inner) >= 2 and inner[0] == '"' and inner[-1] == '"':
-            return inner[1:-1]
-        return str(inner) if inner is not None else ""
+        try:
+            decoded = json.loads(inner) if isinstance(inner, str) else inner
+            return str(decoded) if decoded is not None else ""
+        except (json.JSONDecodeError, ValueError):
+            return str(inner) if inner is not None else ""
     if val is None:
         return ""
-    # Strip JSON string quotes from plain-string form (Form B).
-    if isinstance(val, str) and len(val) >= 2 and val[0] == '"' and val[-1] == '"':
-        return val[1:-1]
-    return str(val)
+    # Forms B and C: str() of the value is a JSON-encoded string.
+    # json.loads strips the surrounding double-quote characters produced by
+    # Pathway's JSON serialization of string values.
+    s = str(val)
+    try:
+        decoded = json.loads(s)
+        if isinstance(decoded, str):
+            return decoded
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return s
 
 
 # ---------------------------------------------------------------------------
