@@ -1,28 +1,54 @@
-"""Pathway ingest pipeline — agentopia-rag-platform Phase 3.
+"""Pathway ingest pipeline — agentopia-rag-platform.
 
-Entry point for the differential dataflow ingest pipeline.
-Reads documents from S3, chunks + embeds them, and upserts into Qdrant.
+Phase 3 (ADR-001): the runtime is source-aware. At startup we read every
+active `managed_upload` row from the control-plane `knowledge_sources`
+table and materialise one Pathway watcher per source, each sinking into
+its own scope-derived Qdrant collection (`kb-{sha256(scope)[:16]}`).
 
-All configuration is via environment variables (set from K8s Secrets):
-  QDRANT_URL           — e.g. http://qdrant:6333
-  QDRANT_COLLECTION    — target collection name, e.g. kb-<scope_hash>
-  SCOPE_IDENTITY       — human-readable scope, e.g. utop/oddspark (default: QDRANT_COLLECTION)
-  S3_BUCKET_NAME       — source S3 bucket
-  S3_PREFIX            — object prefix to poll, e.g. scopes/{scope}/
-  S3_REGION            — AWS region
-  S3_ACCESS_KEY        — AWS access key ID (from K8s Secret)
-  S3_SECRET_ACCESS_KEY — AWS secret access key (from K8s Secret)
-  EMBEDDING_BASE_URL   — OpenAI-compatible base URL (e.g. https://api.openai.com/v1)
-  EMBEDDING_API_KEY    — API key for the embedding endpoint
-  EMBEDDING_MODEL      — model name, default text-embedding-3-small
-  PATHWAY_POLL_INTERVAL_SECS — S3 poll interval in seconds, default 30
-  PATHWAY_STATE_DIR    — path for persistence state PVC, default /var/pathway/state
+Backward-compatibility envelope during the Phase 3/4 window:
+
+  * The old single-prefix env contract (`S3_BUCKET_NAME`, `S3_PREFIX`,
+    `S3_REGION`, `SCOPE_IDENTITY`, `QDRANT_COLLECTION`) still bootstraps
+    a synthetic pilot source when `knowledge_sources` has no rows — see
+    `source_registry.synthesize_pilot_source`. New deployments should
+    stop relying on it once a row is backfilled, per Phase 1.
+  * Qdrant payload still carries the same fields as before (`scope`,
+    `document_id`, `section_path`, ...). We additionally write
+    `source_id` on every new chunk. Existing chunks without `source_id`
+    stay queryable — retrieval filters on `scope`, which continues to
+    work for both shapes.
+  * `document_id` stays the raw S3 key (e.g. `architecture/foo.md`).
+    Changing it now would invalidate every current Qdrant point's
+    identity and force a global reindex. A canonical source-aware
+    `document_id` is a future-phase concern once the corpus is entirely
+    new-shape.
+
+Per-source env vars (still read, now optional):
+    QDRANT_URL                — Qdrant endpoint (shared by all watchers)
+    EMBEDDING_BASE_URL        — OpenAI-compatible embeddings endpoint
+    EMBEDDING_API_KEY         — API key for the embedding endpoint
+    EMBEDDING_MODEL           — default text-embedding-3-small
+    S3_ACCESS_KEY             — AWS creds, shared across managed sources
+    S3_SECRET_ACCESS_KEY
+    PATHWAY_POLL_INTERVAL_SECS — S3 poll interval in seconds, default 30
+    PATHWAY_STATE_DIR         — path for persistence state PVC
+
+Registry connectivity env (new in Phase 3):
+    DATABASE_URL              — Postgres DSN; when unset, the runtime
+                                falls back to the synthetic pilot
+                                source built from the env vars below
+                                (preserves local dev + bootstrap).
+
+Per-source fields live on the `knowledge_sources` row; Phase 3 reads
+them directly via `source_registry.resolve_sources()` — the old single-
+prefix env vars drive only the synthetic-fallback path.
 """
 
 import hashlib
 import json
+import logging
 import os
-import re
+import sys
 import time as _time
 
 import pathway as pw
@@ -32,18 +58,23 @@ from qdrant_client.models import Distance, PointStruct, VectorParams
 
 from dotenv import load_dotenv
 
+from ingest.source_registry import SourceConfig, log_source_plan, resolve_sources
+
 load_dotenv()
 
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+)
+logger = logging.getLogger("pipeline")
+
+
 # ---------------------------------------------------------------------------
-# Configuration
+# Shared configuration (non-source)
 # ---------------------------------------------------------------------------
 
 QDRANT_URL = os.environ["QDRANT_URL"]
-QDRANT_COLLECTION = os.environ["QDRANT_COLLECTION"]
 
-S3_BUCKET = os.environ["S3_BUCKET_NAME"]
-S3_PREFIX = os.environ.get("S3_PREFIX", "")
-S3_REGION = os.environ.get("S3_REGION", "us-east-1")
 S3_ACCESS_KEY = os.environ["S3_ACCESS_KEY"]
 S3_SECRET_KEY = os.environ["S3_SECRET_ACCESS_KEY"]
 
@@ -53,66 +84,38 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
 
 POLL_INTERVAL = int(os.environ.get("PATHWAY_POLL_INTERVAL_SECS", "30"))
 STATE_DIR = os.environ.get("PATHWAY_STATE_DIR", "/var/pathway/state")
-# Human-readable scope identity stored in Qdrant payload (e.g. "utop/oddspark").
-# Defaults to QDRANT_COLLECTION (collection hash) if not explicitly set.
-# Set SCOPE_IDENTITY to the source scope for correct gateway retrieval filtering.
-SCOPE_IDENTITY = os.environ.get("SCOPE_IDENTITY", QDRANT_COLLECTION)
 
-VECTOR_DIM = 1536  # text-embedding-3-small output dimension
-# text-embedding-3-small max input: 8191 tokens (~4 chars/token).
-# Safety-net truncation guard — normal operation should not hit this after chunking.
-_MAX_EMBED_CHARS = 30_000  # ≈ 7500 tokens — fallback ceiling if a chunk is unexpectedly large
-
-# Chunking parameters.
-# Primary split: markdown H1/H2/H3 headers (detected outside fenced code blocks).
-# Fallback: bounded windows with overlap for sections exceeding _CHUNK_MAX_CHARS.
-_CHUNK_MAX_CHARS = 8_000   # ≈ 2000 tokens — ceiling per chunk, well under embedding limit
-_CHUNK_OVERLAP_CHARS = 200  # overlap between window sub-chunks for context continuity
+VECTOR_DIM = 1536
+_MAX_EMBED_CHARS = 30_000
+_CHUNK_MAX_CHARS = 8_000
+_CHUNK_OVERLAP_CHARS = 200
 
 _openai_client = OpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_BASE_URL)
 
+
 # ---------------------------------------------------------------------------
-# Markdown chunking
+# Markdown chunking  (unchanged from Phase 0 — still deterministic per doc)
 # ---------------------------------------------------------------------------
 
 def _chunk_markdown(text: str) -> list:
     """Split a markdown document into sub-document chunks.
 
-    Primary strategy: split at H1 / H2 / H3 header boundaries so each
-    section becomes its own chunk.  This preserves semantic coherence for
-    structured markdown documents (the corpus standard for utop/oddspark).
-
-    Headers are detected line-by-line with fenced code block tracking so
-    that Python/shell comment lines inside code blocks (e.g. "# variable")
-    are never mistaken for markdown headers.
-
-    Fallback: when a section exceeds _CHUNK_MAX_CHARS (e.g. a dense code
-    block or very long prose section), the section is subdivided into
-    overlapping fixed-size windows using _CHUNK_OVERLAP_CHARS of overlap
-    to maintain context continuity across the boundary.
-
-    Each returned dict has:
-      text         — chunk text (includes the header line when split at header)
-      section      — header title string (stripped of leading '#'), or "" for
-                     preamble text before the first header
-      chunk_index  — 0-based index of this chunk within the document
-      total_chunks — total number of chunks for this document
+    Primary: header boundaries (H1/H2/H3 outside fenced code blocks).
+    Fallback: overlapping fixed-size windows when a section exceeds the
+    per-chunk ceiling.
     """
+    import re as _re
+
     if not isinstance(text, str):
-        # S3 plaintext_by_object delivers str; guard against unexpected bytes.
         try:
             text = text.decode("utf-8", errors="replace")
         except AttributeError:
             text = str(text)
 
-    # Scan line-by-line, tracking fenced code blocks.
-    # Headers (H1-H3) are only matched outside fences so that comment lines
-    # inside code blocks (e.g. "# python_var", "# shell comment") are ignored.
     in_fence = False
     fence_marker = ""
-    header_positions: list = []  # [(char_offset, title), ...]
+    header_positions: list = []
     pos = 0
-
     for line in text.splitlines(keepends=True):
         stripped = line.lstrip()
         if not in_fence:
@@ -120,7 +123,7 @@ def _chunk_markdown(text: str) -> list:
                 in_fence = True
                 fence_marker = stripped[:3]
             else:
-                m = re.match(r'^(#{1,3}) (.+)', line)
+                m = _re.match(r'^(#{1,3}) (.+)', line)
                 if m:
                     header_positions.append((pos, m.group(2).strip()))
         else:
@@ -128,13 +131,10 @@ def _chunk_markdown(text: str) -> list:
                 in_fence = False
         pos += len(line)
 
-    # Build (section_title, section_text) pairs from detected header positions
     sections: list = []
     if not header_positions:
-        # No headers — treat the entire document as a single unnamed section.
         sections = [("", text)]
     else:
-        # Preamble before the first header
         if header_positions[0][0] > 0:
             preamble = text[:header_positions[0][0]].strip()
             if preamble:
@@ -145,7 +145,6 @@ def _chunk_markdown(text: str) -> list:
             if section_text:
                 sections.append((title, section_text))
 
-    # Sub-split any section that exceeds the per-chunk ceiling
     chunks: list = []
     for section_title, section_text in sections:
         if len(section_text) <= _CHUNK_MAX_CHARS:
@@ -162,21 +161,17 @@ def _chunk_markdown(text: str) -> list:
                 start = next_start
 
     if not chunks:
-        # Absolute fallback: emit a single chunk with truncated content.
         chunks = [{"section": "", "text": text[:_CHUNK_MAX_CHARS]}]
 
-    # Annotate with positional metadata
     total = len(chunks)
     for i, chunk in enumerate(chunks):
         chunk["chunk_index"] = i
         chunk["total_chunks"] = total
-
     return chunks
 
 
 @pw.udf
 def chunk_text(text: str) -> list:
-    """Pathway UDF: split one document into a list of chunk dicts."""
     if not isinstance(text, str):
         try:
             s = str(text)
@@ -188,23 +183,11 @@ def chunk_text(text: str) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Embedding
+# Embedding UDF (unchanged)
 # ---------------------------------------------------------------------------
 
 @pw.udf
 def embed_chunk(chunk) -> list:
-    """Embed a single chunk dict (pw.Json from flatten output).
-
-    Receives one chunk dict per row after flatten().  The dict may arrive as
-    a plain Python dict (Pathway deserialises pw.Json for UDFs) or as a
-    pw.Json object — both forms are handled defensively.
-
-    After sub-document chunking, chunk sizes are well below _MAX_EMBED_CHARS
-    in normal operation.  The truncation guard remains as a safety net for
-    unexpectedly large sections or malformed input.
-    """
-    # Deserialise chunk dict — it arrives as Python dict when Pathway
-    # deserialises the pw.Json column, but handle raw pw.Json defensively.
     if isinstance(chunk, dict):
         text = str(chunk.get("text", ""))
     else:
@@ -222,24 +205,11 @@ def embed_chunk(chunk) -> list:
 
 
 # ---------------------------------------------------------------------------
-# JSON unwrapping helpers
+# JSON unwrapping helpers (unchanged)
 # ---------------------------------------------------------------------------
 
 def _unwrap_json(val: object) -> str:
-    """Unwrap a Pathway Json column value from its ConnectorObserver row form.
-
-    Pathway delivers pw.Json-typed columns (e.g. pw.this._metadata["path"]) as
-    one of three forms in on_change row dicts:
-      Form A — dict wrapper:  {"_value": '"path/to/file.md"'}
-      Form B — plain str:     '"path/to/file.md"'  (raw JSON text, Python str type)
-      Form C — pw.Json obj:   str(val) == '"path/to/file.md"'  (not a plain str/dict)
-
-    In all cases str(val) produces the JSON-encoded representation of the value,
-    so json.loads(str(val)) is the correct canonical decoder.  Form A is handled
-    via the dict branch for safety; Forms B and C fall through to json.loads.
-    """
     if isinstance(val, dict) and "_value" in val:
-        # Form A: unwrap the _value key, then json-decode to strip JSON encoding.
         inner = val["_value"]
         try:
             decoded = json.loads(inner) if isinstance(inner, str) else inner
@@ -248,9 +218,6 @@ def _unwrap_json(val: object) -> str:
             return str(inner) if inner is not None else ""
     if val is None:
         return ""
-    # Forms B and C: str() of the value is a JSON-encoded string.
-    # json.loads strips the surrounding double-quote characters produced by
-    # Pathway's JSON serialization of string values.
     s = str(val)
     try:
         decoded = json.loads(s)
@@ -262,12 +229,6 @@ def _unwrap_json(val: object) -> str:
 
 
 def _unwrap_chunk_dict(val: object) -> dict:
-    """Extract a Python dict from a pw.Json chunk column in on_change.
-
-    After flatten(), the chunk column (pw.Json) arrives in on_change as
-    either a plain Python dict (Pathway deserialises for ConnectorObserver)
-    or as a pw.Json object whose str() is a JSON-encoded dict.
-    """
     if isinstance(val, dict):
         return val
     if val is None:
@@ -280,27 +241,33 @@ def _unwrap_chunk_dict(val: object) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Qdrant sink
+# Qdrant sink — now source-aware
 # ---------------------------------------------------------------------------
 
 class QdrantSink(pw.io.python.ConnectorObserver):
-    """Upserts chunk embeddings into a Qdrant collection.
+    """Per-source Qdrant sink.
 
-    Each Qdrant point represents one sub-document chunk.  Pathway's
-    differential dataflow ensures correct retraction (deletion) semantics:
-    when a source document is deleted or updated, all chunk rows derived
-    from that document are retracted by Pathway, and on_change is called
-    with is_addition=False for each chunk — triggering the corresponding
-    Qdrant deletes automatically.
+    Phase-3 change: the sink is constructed with the source's identity
+    (`source_id`, `scope_identity`) and the derived Qdrant collection
+    name. Every chunk this sink writes carries `source_id` + `scope` in
+    its payload. Legacy chunks without `source_id` remain queryable —
+    they just don't participate in source-scoped filters.
 
-    Point identity is stable per (document, chunk_index): Pathway's flatten
-    operation assigns each chunk a compound row key (original_doc_key +
-    list_position), which _row_id maps to a stable 63-bit Qdrant point ID.
+    Differential dataflow semantics are preserved: `is_addition=False`
+    rows for retracted chunks delete the corresponding Qdrant points.
     """
 
-    def __init__(self, url: str, collection: str) -> None:
+    def __init__(
+        self,
+        url: str,
+        collection: str,
+        scope_identity: str,
+        source_id: str | None,
+    ) -> None:
         self._client = QdrantClient(url=url)
         self._collection = collection
+        self._scope_identity = scope_identity
+        self._source_id = source_id
         self._ensure_collection()
 
     def _ensure_collection(self) -> None:
@@ -312,8 +279,6 @@ class QdrantSink(pw.io.python.ConnectorObserver):
             )
 
     def _row_id(self, key: pw.Pointer) -> int:
-        # Pathway Pointer (compound after flatten: doc_key + chunk_index position)
-        # → stable 63-bit int suitable for Qdrant point ID.
         return int(hashlib.sha256(str(key).encode()).hexdigest(), 16) % (2**63)
 
     def on_change(
@@ -325,43 +290,36 @@ class QdrantSink(pw.io.python.ConnectorObserver):
     ) -> None:
         point_id = self._row_id(key)
         if is_addition:
-            # chunk column contains the full chunk dict (pw.Json).
-            # _unwrap_chunk_dict handles both Python-dict and pw.Json-object forms.
             chunk = _unwrap_chunk_dict(row.get("chunk"))
             chunk_text = str(chunk.get("text", ""))
             section = str(chunk.get("section", ""))
             chunk_index = int(chunk.get("chunk_index", 0))
             total_chunks = int(chunk.get("total_chunks", 1))
 
+            payload = {
+                "document_id": _unwrap_json(row.get("document_id")),
+                # Canonical scope identity for retrieval filters —
+                # unchanged from Phase 0 so legacy and Phase-3 chunks
+                # co-exist under the same filter.
+                "scope": self._scope_identity,
+                "section_path": _unwrap_json(row.get("section_path")),
+                "section": section,
+                "chunk_index": chunk_index,
+                "total_chunks": total_chunks,
+                "text": chunk_text,
+                "status": "active",
+                "document_hash": hashlib.sha256(chunk_text.encode()).hexdigest(),
+                "ingested_at": _time.time(),
+            }
+            # Phase-3 additive payload field: stable source identity.
+            # Synthetic pilot sources do not have a source_id; the field
+            # is omitted rather than faked so downstream code can tell.
+            if self._source_id:
+                payload["source_id"] = self._source_id
+
             self._client.upsert(
                 collection_name=self._collection,
-                points=[
-                    PointStruct(
-                        id=point_id,
-                        vector=row["embedding"],
-                        payload={
-                            "document_id": _unwrap_json(row.get("document_id")),
-                            "scope": SCOPE_IDENTITY,
-                            "section_path": _unwrap_json(row.get("section_path")),
-                            "section": section,
-                            "chunk_index": chunk_index,
-                            "total_chunks": total_chunks,
-                            "text": chunk_text,
-                            "status": "active",
-                            # document_hash: SHA-256 of this chunk's text — enables
-                            # chunk-level deduplication and change detection.
-                            "document_hash": hashlib.sha256(
-                                chunk_text.encode()
-                            ).hexdigest(),
-                            # ingested_at: wall-clock Unix timestamp (seconds) when this
-                            # chunk was written to Qdrant. Pathway's `time` parameter is a
-                            # logical batch epoch in ms (autocommit_duration_ms cycles) —
-                            # NOT wall-clock time. _time.time() is the correct source for
-                            # freshness lag measurement (P3.5).
-                            "ingested_at": _time.time(),
-                        },
-                    )
-                ],
+                points=[PointStruct(id=point_id, vector=row["embedding"], payload=payload)],
             )
         else:
             self._client.delete(
@@ -374,16 +332,31 @@ class QdrantSink(pw.io.python.ConnectorObserver):
 
 
 # ---------------------------------------------------------------------------
-# Pipeline
+# Per-source subgraph
 # ---------------------------------------------------------------------------
 
-def build_pipeline() -> None:
-    # -- Source: S3 polling connector ----------------------------------------
+def _build_source_subgraph(source: SourceConfig) -> None:
+    """Construct the ingest subgraph for one source.
+
+    Each source contributes an independent `pw.io.s3.read(...)` connector
+    plus the chunk/embed/sink chain; `pw.run()` evaluates all of them in
+    one process. Writing them as separate subgraphs — instead of one
+    unioned table — keeps Qdrant sink routing trivial (one sink per
+    source, one collection per scope).
+    """
+    logger.info(
+        "pipeline: building subgraph  source_id=%s  scope=%s  s3://%s/%s",
+        source.source_id or "synthetic-env",
+        source.scope_identity,
+        source.bucket,
+        source.prefix,
+    )
+
     documents = pw.io.s3.read(
-        S3_PREFIX,
+        source.prefix,
         aws_s3_settings=pw.io.s3.AwsS3Settings(
-            bucket_name=S3_BUCKET,
-            region=S3_REGION,
+            bucket_name=source.bucket,
+            region=source.region,
             access_key=S3_ACCESS_KEY,
             secret_access_key=S3_SECRET_KEY,
         ),
@@ -393,34 +366,12 @@ def build_pipeline() -> None:
         autocommit_duration_ms=POLL_INTERVAL * 1000,
     )
 
-    # -- Transform: derive document_id and section_path from S3 object key ----
-    # pw.this._metadata["path"] produces a pw.Json-typed column. When delivered
-    # to ConnectorObserver.on_change it arrives as {"_value": "s3/key.md"}.
-    # _unwrap_json() in on_change extracts the plain string from that wrapper.
     documents = documents.select(
         text=pw.this.data,
         document_id=pw.this._metadata["path"],
         section_path=pw.this._metadata["path"],
     )
 
-    # -- Transform: chunk each document into sub-document pieces --------------
-    # chunk_text() returns list[dict] (section, text, chunk_index, total_chunks).
-    # flatten() expands that list so each chunk becomes its own Pathway row.
-    # After flatten, pw.this.chunks is one chunk dict (pw.Json) per row.
-    #
-    # Row identity design:
-    # Pathway assigns compound row keys (original_doc_key + list_position) after
-    # flatten().  This means each chunk's Qdrant point ID is stable per
-    # (document, chunk_index).  When a source document is deleted or updated,
-    # Pathway retracts all derived chunk rows — QdrantSink.on_change receives
-    # is_addition=False for each chunk and deletes the corresponding point.
-    #
-    # Important: Pathway 0.30.0 does not support string-key indexing on pw.Json
-    # columns in select() expressions (only integer indexing on arrays).  To
-    # avoid this limitation, the full chunk dict is passed as a single column
-    # ("chunk") to the sink and embedded via embed_chunk().  Field extraction
-    # (section, chunk_index, total_chunks, text) happens inside the UDF and
-    # inside on_change(), where plain Python dict access is available.
     documents_with_chunks = documents.select(
         chunks=chunk_text(pw.this.text),
         document_id=pw.this.document_id,
@@ -429,9 +380,6 @@ def build_pipeline() -> None:
 
     chunk_rows = documents_with_chunks.flatten(pw.this.chunks)
 
-    # -- Transform: embed each chunk ------------------------------------------
-    # embed_chunk() receives the full chunk dict (pw.Json) and extracts the
-    # "text" field internally to avoid pw.Json string-key indexing in the graph.
     embedded = chunk_rows.select(
         chunk=pw.this.chunks,
         document_id=pw.this.document_id,
@@ -439,12 +387,47 @@ def build_pipeline() -> None:
         embedding=embed_chunk(pw.this.chunks),
     )
 
-    # -- Sink: Qdrant upsert --------------------------------------------------
-    pw.io.python.write(embedded, QdrantSink(url=QDRANT_URL, collection=QDRANT_COLLECTION))
+    pw.io.python.write(
+        embedded,
+        QdrantSink(
+            url=QDRANT_URL,
+            collection=source.qdrant_collection,
+            scope_identity=source.scope_identity,
+            source_id=source.source_id,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def build_pipeline(sources: list[SourceConfig] | None = None) -> int:
+    """Construct the Pathway dataflow graph.
+
+    Returns the number of source watchers materialised. The caller (or
+    the module main) fails fast when zero — trying to `pw.run()` with
+    no watchers is a silent no-op in Pathway.
+    """
+    if sources is None:
+        sources = resolve_sources()
+    log_source_plan(sources)
+    if not sources:
+        return 0
+    for source in sources:
+        _build_source_subgraph(source)
+    return len(sources)
 
 
 if __name__ == "__main__":
-    build_pipeline()
+    count = build_pipeline()
+    if count == 0:
+        logger.error(
+            "pipeline: no active managed_upload sources found and no pilot "
+            "env fallback is configured — refusing to start a zero-watcher "
+            "Pathway process (would silently do nothing)."
+        )
+        sys.exit(1)
 
     pw.run(
         persistence_config=pw.persistence.Config(
