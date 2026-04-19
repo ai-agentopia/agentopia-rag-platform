@@ -68,6 +68,7 @@ from qdrant_client.models import Distance, PointStruct, VectorParams  # noqa: E4
 from dotenv import load_dotenv  # noqa: E402
 
 from ingest.source_registry import SourceConfig, log_source_plan, resolve_sources  # noqa: E402
+from ingest.vault_creds import CredentialError, read_s3_credentials  # noqa: E402
 
 load_dotenv()
 
@@ -344,6 +345,31 @@ class QdrantSink(pw.io.python.ConnectorObserver):
 # Per-source subgraph
 # ---------------------------------------------------------------------------
 
+def _resolve_source_s3_credentials(source: SourceConfig) -> tuple[str, str]:
+    """Pick the AWS key pair the watcher for this source should use.
+
+    Phase 4 contract:
+      * `managed_upload` + synthetic pilot → shared env vars. These buckets
+        are Agentopia-owned, so one IAM principal covers every watcher.
+      * `external_s3`                     → per-source Vault secret at
+        `source.credential_ref`. Each customer source runs with its own
+        least-privilege credential; a compromise on one is isolated.
+
+    Failure to resolve is raised as CredentialError so the caller can
+    skip this source without taking down unrelated watchers.
+    """
+    if source.is_external:
+        if not source.credential_ref:
+            # Defence in depth — source_registry already rejects this,
+            # but keep the invariant local to the credential path too.
+            raise CredentialError(
+                f"external_s3 source {source.source_id} has no credential_ref",
+            )
+        creds = read_s3_credentials(source.credential_ref)
+        return creds.access_key, creds.secret_key
+    return S3_ACCESS_KEY, S3_SECRET_KEY
+
+
 def _build_source_subgraph(source: SourceConfig) -> None:
     """Construct the ingest subgraph for one source.
 
@@ -352,22 +378,30 @@ def _build_source_subgraph(source: SourceConfig) -> None:
     one process. Writing them as separate subgraphs — instead of one
     unioned table — keeps Qdrant sink routing trivial (one sink per
     source, one collection per scope).
+
+    Phase 4: `external_s3` sources get their own S3 credentials resolved
+    from Vault at `credential_ref`; Pathway calls `pw.io.s3.read(...)`
+    only — never `put_object` / `delete_object` — so the customer's
+    bucket is read-only from Agentopia's perspective.
     """
     logger.info(
-        "pipeline: building subgraph  source_id=%s  scope=%s  s3://%s/%s",
+        "pipeline: building subgraph  source_id=%s  kind=%s  scope=%s  s3://%s/%s",
         source.source_id or "synthetic-env",
+        source.kind,
         source.scope_identity,
         source.bucket,
         source.prefix,
     )
+
+    access_key, secret_key = _resolve_source_s3_credentials(source)
 
     documents = pw.io.s3.read(
         source.prefix,
         aws_s3_settings=pw.io.s3.AwsS3Settings(
             bucket_name=source.bucket,
             region=source.region,
-            access_key=S3_ACCESS_KEY,
-            secret_access_key=S3_SECRET_KEY,
+            access_key=access_key,
+            secret_access_key=secret_key,
         ),
         format="plaintext_by_object",
         mode="streaming",
@@ -423,9 +457,20 @@ def build_pipeline(sources: list[SourceConfig] | None = None) -> int:
     log_source_plan(sources)
     if not sources:
         return 0
+    built = 0
     for source in sources:
-        _build_source_subgraph(source)
-    return len(sources)
+        try:
+            _build_source_subgraph(source)
+            built += 1
+        except CredentialError as exc:
+            # A Vault miss / Vault outage for ONE external_s3 source
+            # must not kill unrelated watchers. Log loudly; the next
+            # pod restart will retry.
+            logger.error(
+                "pipeline: skipping source_id=%s kind=%s scope=%s — %s",
+                source.source_id, source.kind, source.scope_identity, exc,
+            )
+    return built
 
 
 if __name__ == "__main__":

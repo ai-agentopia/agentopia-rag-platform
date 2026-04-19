@@ -56,16 +56,27 @@ class SourceConfig:
     """Everything the Pathway runtime needs to stand up a single watcher."""
 
     source_id: str | None  # None for synthetic pilot-env fallbacks
+    kind: str              # "managed_upload" | "external_s3" | "synthetic"
     scope_identity: str    # e.g. "utop/oddspark" — human-readable
     bucket: str
     prefix: str
     region: str
     qdrant_collection: str  # kb-{sha256(scope)[:16]}
+    # ADR-001 Phase 4: `credential_ref` is the Vault path that holds the
+    # per-source access_key + secret_key for external_s3 sources. None for
+    # managed_upload (those reuse the shared S3_ACCESS_KEY / S3_SECRET_ACCESS_KEY
+    # env vars) and for synthetic fallbacks.
+    credential_ref: str | None = None
 
     @property
     def is_synthetic(self) -> bool:
         """True when this config came from env vars, not a DB row."""
         return self.source_id is None
+
+    @property
+    def is_external(self) -> bool:
+        """True for external_s3 sources — runtime never writes to their bucket."""
+        return self.kind == "external_s3"
 
 
 def _qdrant_collection_for_scope(scope: str) -> str:
@@ -87,6 +98,9 @@ def _db_url() -> str:
     return os.getenv("DATABASE_URL", "")
 
 
+_SUPPORTED_KINDS = ("managed_upload", "external_s3")
+
+
 def _row_to_config(row: dict) -> SourceConfig | None:
     """Project a `knowledge_sources` row onto a SourceConfig.
 
@@ -94,6 +108,10 @@ def _row_to_config(row: dict) -> SourceConfig | None:
     target — incomplete `storage_ref` fields, unsupported kind, or
     non-active status. This is the "skip with error, don't ingest wrong
     data" contract from the module docstring.
+
+    Phase 4: both `managed_upload` and `external_s3` are runtime-ingestible;
+    `external_s3` rows must carry a `credential_ref` so the runtime can
+    fetch per-source credentials at watcher-init time.
     """
     kind = str(row.get("kind") or "")
     status = str(row.get("status") or "")
@@ -101,14 +119,23 @@ def _row_to_config(row: dict) -> SourceConfig | None:
     client_id = row.get("client_id") or ""
     scope_name = row.get("scope_name") or ""
     scope_identity = f"{client_id}/{scope_name}" if client_id and scope_name else ""
+    credential_ref = row.get("credential_ref")
 
-    if kind != "managed_upload":
-        # external_s3 and future kinds are handled by later phases.
+    if kind not in _SUPPORTED_KINDS:
+        # Future kinds (GDrive, SharePoint, Airbyte-fronted importers)
+        # will live under their own branches — never silently ingest
+        # something we haven't explicitly wired.
+        logger.info(
+            "source_registry: skipping source %s (unsupported kind=%s)",
+            source_id, kind,
+        )
         return None
     if status != "active":
+        # `provisioning`, `paused`, `error`, `deprovisioning` all skip —
+        # the runtime never watches a source that isn't explicitly green.
         logger.info(
-            "source_registry: skipping source %s (status=%s, scope=%s)",
-            source_id, status, scope_identity,
+            "source_registry: skipping source %s kind=%s (status=%s, scope=%s)",
+            source_id, kind, status, scope_identity,
         )
         return None
     if not scope_identity:
@@ -136,18 +163,33 @@ def _row_to_config(row: dict) -> SourceConfig | None:
         )
         return None
 
+    if kind == "external_s3" and not credential_ref:
+        logger.warning(
+            "source_registry: skipping external_s3 source %s scope=%s — "
+            "credential_ref is required",
+            source_id, scope_identity,
+        )
+        return None
+
     return SourceConfig(
         source_id=source_id,
+        kind=kind,
         scope_identity=scope_identity,
         bucket=str(bucket),
         prefix=str(prefix),
         region=str(region),
         qdrant_collection=_qdrant_collection_for_scope(scope_identity),
+        credential_ref=str(credential_ref) if credential_ref else None,
     )
 
 
 def load_active_sources() -> list[SourceConfig]:
-    """Return every active `managed_upload` source safe to ingest from.
+    """Return every active source (managed_upload + external_s3) safe to watch.
+
+    Phase 4: both supported kinds are projected; each row is filtered
+    via `_row_to_config` so any per-kind invariant violation (missing
+    credential_ref on external_s3, incomplete storage_ref, …) results
+    in a skip rather than a runtime error.
 
     An empty list is a valid result — callers are expected to check
     before constructing the Pathway graph and should apply the
@@ -166,9 +208,9 @@ def load_active_sources() -> list[SourceConfig]:
             rows = conn.execute(
                 """
                 SELECT source_id, client_id, scope_name, kind,
-                       display_name, status, storage_ref
+                       display_name, status, storage_ref, credential_ref
                   FROM knowledge_sources
-                 WHERE kind = 'managed_upload'
+                 WHERE kind IN ('managed_upload', 'external_s3')
                    AND status = 'active'
               ORDER BY client_id ASC, scope_name ASC, created_at ASC
                 """,
@@ -185,9 +227,13 @@ def load_active_sources() -> list[SourceConfig]:
         cfg = _row_to_config(row)
         if cfg is not None:
             configs.append(cfg)
+    kinds = {}
+    for c in configs:
+        kinds[c.kind] = kinds.get(c.kind, 0) + 1
+    summary = ", ".join(f"{v} {k}" for k, v in sorted(kinds.items())) or "none"
     logger.info(
-        "source_registry: loaded %d managed_upload source(s) from knowledge_sources",
-        len(configs),
+        "source_registry: loaded %d active source(s) from knowledge_sources (%s)",
+        len(configs), summary,
     )
     return configs
 
@@ -222,11 +268,13 @@ def synthesize_pilot_source() -> SourceConfig | None:
     )
     return SourceConfig(
         source_id=None,
+        kind="synthetic",
         scope_identity=scope_identity,
         bucket=bucket,
         prefix=prefix,
         region=region,
         qdrant_collection=qdrant_collection,
+        credential_ref=None,
     )
 
 
