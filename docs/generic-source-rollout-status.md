@@ -13,8 +13,8 @@ five-phase shape is defined in
 | Phase | Summary | Status |
 |---|---|---|
 | 0 | GitHub-specific artifacts removed; ADR-001 accepted | ✅ Done (2026-04-19) |
-| **1** | `knowledge_sources` schema + backfill + read-only control plane + upload-path shim | ✅ Done (2026-04-19) |
-| 2 | API shim with explicit `source_id`, new managed-upload key format | ⏳ Not started |
+| 1 | `knowledge_sources` schema + backfill + read-only control plane + upload-path shim | ✅ Done (2026-04-19) |
+| **2** | Source-aware ingest contract: explicit `?source_id=`, canonical `upload_id` (`source:{id}:{rel_key}`), `legacy_upload_id` compat, ambiguity 409, source `writable`/`is_default` annotations | ✅ Done (2026-04-19) |
 | 3 | Pathway reads `knowledge_sources`; one watcher per source | ⏳ Not started |
 | 4 | `external_s3` end-to-end | ⏳ Not started |
 | 5 | Retire scope-level `knowledge_bases.s3_*` columns | ⏳ Not started |
@@ -95,11 +95,105 @@ presence and absence — the UI already ignores unknown fields.
   after rollout backfills the pilot scope `utop/oddspark` into a
   source row, subsequent boots are no-ops.
 
+## Phase 2 — what actually shipped
+
+Repo: `agentopia-protocol`, merged as PR
+[#447](https://github.com/ai-agentopia/agentopia-protocol/pull/447) on
+branch `dev`. Deployed via the existing ArgoCD Image Updater flow —
+bot-config-api picks up `dev-5c974fc` automatically.
+
+### Ingest contract
+
+`POST /api/v1/knowledge/{scope}/ingest`
+- Optional `?source_id=<uuid>` query parameter.
+- Explicit source validation: 404 unknown, 403 cross-scope,
+  422 on `external_s3`, 409 on non-active or incomplete storage_ref.
+- Implicit resolution — deterministic, no guessing:
+  * one active `managed_upload` source → auto-select
+  * zero → legacy `knowledge_bases.s3_*` fallback
+  * two or more → 409 with a message that names the candidate
+    source_ids and tells the caller to pass `?source_id=`.
+
+### Canonical upload identity
+
+`upload_id = source:{source_id}:{relative_key}` when a source row
+was resolved. Operators see one shape that is stable per source.
+
+The 202 response carries both fields during the compatibility window:
+
+```
+{
+  "status": "uploaded_to_s3",
+  "upload_id":        "source:3791ba64-…:doc.md",      # canonical
+  "legacy_upload_id": "architecture/doc.md",            # raw S3 key
+  "source_id":        "3791ba64-…",
+  "bucket":           "utop-oddspark-document",
+  ...
+}
+```
+
+On the legacy-fallback path (no source row), `upload_id` and
+`legacy_upload_id` are equal and `source_id` is absent.
+
+### Status route
+
+`GET /api/v1/knowledge/{scope}/uploads/{upload_id}/status` dispatches on
+the identity's shape:
+
+- Canonical id → resolves the source directly, computes the S3 key as
+  `storage_ref.prefix + relative_key`, HEADs S3, and queries Qdrant on
+  that raw key (Pathway still writes raw keys in Phase 2; the
+  source-aware Qdrant `document_id` lands in Phase 3+).
+- Legacy id → single-default resolver. If the scope now has multiple
+  active managed_upload sources, returns 409 "ambiguous" instead of
+  guessing a bucket.
+- Cross-scope canonical ids return 404.
+
+### Source visibility
+
+`GET /{scope}/sources` and `GET /{scope}/sources/{source_id}` now
+annotate each row with:
+
+- `writable` — `kind == 'managed_upload' AND status == 'active'`.
+- `is_default` — true only when this row is the sole active
+  managed_upload source for the scope.
+
+The list response also exposes `default_source_id` (null when the
+scope is multi-source). Operator UIs can drive a source picker
+straight off these flags without re-implementing the selection rules.
+
+### What Phase 2 deliberately does NOT change
+
+- Pathway deployment unchanged — still one watcher per pod, still
+  writes `document_id = raw S3 key` to Qdrant.
+- `knowledge_bases.s3_bucket / s3_prefix / s3_region` still honoured
+  as the legacy-fallback route. Removal is Phase 5.
+- UI requires no change: the new response fields (`source_id`,
+  `legacy_upload_id`) are ignored by existing clients; the canonical
+  `upload_id` round-trips through the status route because the server
+  accepts both formats.
+
+### Evidence
+
+- 22 new Phase-2 pytest cases
+  (`src/tests/test_knowledge_sources_phase2.py`): identity helpers,
+  explicit source_id validation across four error paths, implicit
+  selection (single / zero-fallback / ambiguous), canonical + legacy
+  status dispatch, source annotations.
+- 153 tests pass across all knowledge-touching suites
+  (Phase 1, async_upload, knowledge_bases, knowledge_scope_auth,
+  knowledge_ingest_mode, knowledge_proxy_wiring,
+  knowledge_proxy_auth_semantics, knowledge_settings, and the new
+  Phase-2 file).
+- No migration in this phase — the schema from Phase 1 is sufficient.
+
 ## Pointers
 
 - ADR-001: `docs/adr/adr-001-generic-source-model.md`
 - Phase 1 PR: `ai-agentopia/agentopia-protocol#446`
+- Phase 2 PR: `ai-agentopia/agentopia-protocol#447`
 - Pilot state before Phase 1: bucket `utop-oddspark-document`,
   prefix `architecture/`, region `ap-northeast-1`, scope
   `utop/oddspark`. Phase 1 copies that triple into a backfilled
-  source row; nothing in the live ingest path reads the new row yet.
+  source row; Phase 2 makes the upload/status contract source-aware
+  without changing the runtime behaviour for that row.
