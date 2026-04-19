@@ -69,8 +69,6 @@ from dotenv import load_dotenv  # noqa: E402
 
 from ingest.source_registry import SourceConfig, log_source_plan, resolve_sources  # noqa: E402
 
-from ingest.source_registry import SourceConfig, log_source_plan, resolve_sources
-
 load_dotenv()
 
 logging.basicConfig(
