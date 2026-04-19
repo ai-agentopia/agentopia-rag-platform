@@ -51,14 +51,23 @@ import os
 import sys
 import time as _time
 
-import pathway as pw
-from openai import OpenAI
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+# The container runs `python src/ingest/pipeline.py`, so only the script's
+# own directory lands on sys.path. Put `src/` on the path so the sibling
+# `ingest.*` package imports resolve. Running `python -m ingest.pipeline`
+# would avoid this, but the Dockerfile entrypoint predates the package
+# layout and there's no reason to couple this change to a Dockerfile bump.
+_SRC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _SRC_ROOT not in sys.path:
+    sys.path.insert(0, _SRC_ROOT)
 
-from dotenv import load_dotenv
+import pathway as pw  # noqa: E402
+from openai import OpenAI  # noqa: E402
+from qdrant_client import QdrantClient  # noqa: E402
+from qdrant_client.models import Distance, PointStruct, VectorParams  # noqa: E402
 
-from ingest.source_registry import SourceConfig, log_source_plan, resolve_sources
+from dotenv import load_dotenv  # noqa: E402
+
+from ingest.source_registry import SourceConfig, log_source_plan, resolve_sources  # noqa: E402
 
 load_dotenv()
 
