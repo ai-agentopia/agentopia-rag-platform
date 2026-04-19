@@ -14,9 +14,9 @@ five-phase shape is defined in
 |---|---|---|
 | 0 | GitHub-specific artifacts removed; ADR-001 accepted | ✅ Done (2026-04-19) |
 | 1 | `knowledge_sources` schema + backfill + read-only control plane + upload-path shim | ✅ Done (2026-04-19) |
-| **2** | Source-aware ingest contract: explicit `?source_id=`, canonical `upload_id` (`source:{id}:{rel_key}`), `legacy_upload_id` compat, ambiguity 409, source `writable`/`is_default` annotations | ✅ Done (2026-04-19) |
-| 3 | Pathway reads `knowledge_sources`; one watcher per source | ⏳ Not started |
-| 4 | `external_s3` end-to-end | ⏳ Not started |
+| 2 | Source-aware ingest contract: explicit `?source_id=`, canonical `upload_id` (`source:{id}:{rel_key}`), `legacy_upload_id` compat, ambiguity 409, source `writable`/`is_default` annotations | ✅ Done (2026-04-19) |
+| **3** | Pathway runtime reads `knowledge_sources` at startup, one watcher per active `managed_upload` source, `source_id` in Qdrant payload, legacy chunks readable in-place | ✅ Done (2026-04-20) |
+| 4 | `external_s3` end-to-end (per-source Vault creds, read-only watchers) | ⏳ Not started |
 | 5 | Retire scope-level `knowledge_bases.s3_*` columns | ⏳ Not started |
 
 ## Phase 1 — what actually shipped
@@ -187,13 +187,133 @@ straight off these flags without re-implementing the selection rules.
   Phase-2 file).
 - No migration in this phase — the schema from Phase 1 is sufficient.
 
+## Phase 3 — what actually shipped
+
+Repos: `agentopia-rag-platform` (runtime) and `agentopia-infra` (chart).
+Three PRs landed on `main`:
+
+- [rag-platform#50](https://github.com/ai-agentopia/agentopia-rag-platform/pull/50)
+  — source registry + per-source watchers (`dev-0bca45b`).
+- [rag-platform#51](https://github.com/ai-agentopia/agentopia-rag-platform/pull/51)
+  — put `src/` on `sys.path` so the `ingest.source_registry` package
+  import resolves under the existing Dockerfile entrypoint.
+- [rag-platform#52](https://github.com/ai-agentopia/agentopia-rag-platform/pull/52)
+  — add `psycopg[binary]>=3.2` to the pipeline image; remove a
+  duplicate import.
+- [infra#149](https://github.com/ai-agentopia/agentopia-infra/pull/149)
+  — wire `DATABASE_URL` (optional secretKeyRef) into the pathway-
+  pipeline Deployment so the runtime can reach `knowledge_sources`.
+
+Live image on the dev cluster: `ghcr.io/ai-agentopia/agentopia-rag-platform:dev-08f603e`.
+
+### Runtime model
+
+- **Registry read: startup-only.** `pipeline.py::build_pipeline()` calls
+  `source_registry.resolve_sources()` once at process start and
+  materialises one `pw.io.s3.read(...)` subgraph per active
+  `managed_upload` row. Hot reload is not attempted; Pathway's DAG is
+  constructed before `pw.run()` anyway, so a new source requires a pod
+  restart. This keeps lifecycle predictable and avoids mid-flight
+  watcher churn.
+- **Fallback.** When `knowledge_sources` is empty and `DATABASE_URL` is
+  unreachable but the Phase-0 env contract is still set, the runtime
+  synthesises a single pilot source (`source_id=None`) from
+  `S3_BUCKET_NAME / S3_PREFIX / S3_REGION / SCOPE_IDENTITY`. Preserves
+  local-dev and fresh-cluster boot.
+- **One watcher per source.** Each source owns its own
+  `pw.io.s3.read → chunk → embed → QdrantSink` subgraph; `pw.run()`
+  evaluates all of them in one process. The sink for each source is
+  constructed with that source's `scope_identity`, `source_id`, and
+  derived collection name (`kb-{sha256(scope)[:16]}`).
+
+### Payload shape
+
+Every new chunk written by Phase-3 Pathway carries:
+
+```
+  document_id       raw S3 key (unchanged — e.g. architecture/foo.md)
+  scope             human-readable scope identity (unchanged)
+  source_id         UUID of the knowledge_sources row (NEW)
+  section, section_path, chunk_index, total_chunks, text,
+  document_hash, ingested_at, status   (unchanged)
+```
+
+`document_id` stays the raw S3 key deliberately: changing it would
+invalidate every existing Qdrant point identity and force a full
+reindex. A source-aware `document_id` is a future-phase concern once
+the corpus is entirely new-shape.
+
+### Compatibility rules during rollout
+
+- **Legacy chunks stay readable.** Existing chunks written before
+  Phase 3 have no `source_id` field. They are unaffected — scope-
+  filtered retrieval by `scope = "utop/oddspark"` returns both shapes,
+  the bot's search works identically, and no scope-identity cutover is
+  required.
+- **No reindex required.** Verified live: the pilot's
+  `architecture/overview.md` chunks remain in Qdrant without
+  `source_id` after the Phase-3 rollout; only newly-uploaded documents
+  get the field. A future backfill that paints `source_id` onto legacy
+  chunks is possible but not necessary until a source-scoped filter
+  becomes part of a query path.
+- **Env compat.** `S3_BUCKET_NAME`, `S3_PREFIX`, `S3_REGION`,
+  `SCOPE_IDENTITY`, and `QDRANT_COLLECTION` remain honoured as the
+  synthetic-fallback inputs. Once every scope has a populated
+  `knowledge_sources` row (already true for the pilot), these are only
+  exercised on fresh-cluster bootstrap.
+- **Persistence state preserved.** Pathway's filesystem snapshot
+  (`/var/pathway/state`) restored cleanly across the restart —
+  `persistence.input_snapshot` recovered 4,530 entries and resumed
+  from the last known S3 frontier; no re-embedding of existing
+  documents.
+
+### Evidence
+
+- 18 new pytest cases in `tests/test_source_registry.py`: collection
+  derivation byte-identical to bot-config-api, row→SourceConfig
+  projection across every skip path, `load_active_sources` DB-error
+  tolerance, synthetic-pilot fallback precedence rules.
+- Live startup log from the rolled pod:
+  ```
+  ingest.source_registry - source_registry: loaded 1 managed_upload
+      source(s) from knowledge_sources
+  pipeline - pipeline: building subgraph  source_id=3791ba64-…
+      scope=utop/oddspark  s3://utop-oddspark-document/architecture/
+  ```
+- Live upload (marker `quokka-vestibule-1776640689`) indexed by
+  Pathway; Qdrant payload inspection confirms `source_id` field
+  present on the new chunk and absent on the legacy `architecture/
+  overview.md` chunks — retrieval via knowledge-api `/search` returns
+  both shapes under the same scope filter (HTTP 200, count ≥ 1 for
+  each query).
+- Pilot sanity: `/search?query=super-rag&scopes=utop/oddspark` → HTTP
+  200 after rollout.
+
+### What Phase 3 deliberately does NOT change
+
+- `external_s3` kind — still not runtime-supported; registry skips it.
+  Lives in Phase 4 with per-source Vault credentials and read-only
+  watchers.
+- `document_id` format — stays the raw S3 key so the corpus doesn't
+  need a reindex.
+- `knowledge_bases.s3_bucket / s3_prefix / s3_region` columns —
+  retained as the synthetic-fallback input. Removal is Phase 5.
+- UI — no change; the source-aware upload contract already landed in
+  Phase 2 and clients ignore additive fields.
+
 ## Pointers
 
 - ADR-001: `docs/adr/adr-001-generic-source-model.md`
 - Phase 1 PR: `ai-agentopia/agentopia-protocol#446`
 - Phase 2 PR: `ai-agentopia/agentopia-protocol#447`
+- Phase 3 PRs:
+  - `ai-agentopia/agentopia-rag-platform#50` — runtime + registry.
+  - `ai-agentopia/agentopia-rag-platform#51` — sys.path bootstrap.
+  - `ai-agentopia/agentopia-rag-platform#52` — psycopg dependency.
+  - `ai-agentopia/agentopia-infra#149` — DATABASE_URL env wiring.
 - Pilot state before Phase 1: bucket `utop-oddspark-document`,
   prefix `architecture/`, region `ap-northeast-1`, scope
-  `utop/oddspark`. Phase 1 copies that triple into a backfilled
-  source row; Phase 2 makes the upload/status contract source-aware
-  without changing the runtime behaviour for that row.
+  `utop/oddspark`. Phase 1 copied that triple into a backfilled
+  source row; Phase 2 made the upload/status contract source-aware;
+  Phase 3 drives the runtime from that row. The pilot's behaviour is
+  unchanged — it just stopped being a hard-coded special case.
