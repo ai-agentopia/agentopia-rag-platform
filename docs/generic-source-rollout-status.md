@@ -17,7 +17,7 @@ five-phase shape is defined in
 | 2 | Source-aware ingest contract: explicit `?source_id=`, canonical `upload_id` (`source:{id}:{rel_key}`), `legacy_upload_id` compat, ambiguity 409, source `writable`/`is_default` annotations | ✅ Done (2026-04-19) |
 | **3** | Pathway runtime reads `knowledge_sources` at startup, one watcher per active `managed_upload` source, `source_id` in Qdrant payload, legacy chunks readable in-place | ✅ Done (2026-04-20) |
 | **4** | `external_s3` end-to-end (per-source Vault creds, read-only watchers, automatic watcher teardown on deprovision) | ✅ Done (2026-04-20) |
-| 5 | Retire scope-level `knowledge_bases.s3_*` columns | ⏳ Not started |
+| **5** | Retire scope-level `knowledge_bases.s3_*` columns — remove `_load_legacy_kb_s3`, drop DB columns via migration 030 | ✅ Done (2026-04-20) |
 
 ## Phase 1 — what actually shipped
 
@@ -46,7 +46,7 @@ Migration `bot-config-api/db/029_knowledge_sources.sql` adds:
   `system:adr-001-phase1`. Re-running the migration is a no-op.
 
 The legacy `knowledge_bases.s3_bucket / s3_prefix / s3_region`
-columns **remain in place** as a compatibility shim until Phase 5.
+columns remained in place as a compatibility shim until Phase 5 (now dropped).
 
 ### Control-plane read model
 
@@ -167,7 +167,7 @@ straight off these flags without re-implementing the selection rules.
 - Pathway deployment unchanged — still one watcher per pod, still
   writes `document_id = raw S3 key` to Qdrant.
 - `knowledge_bases.s3_bucket / s3_prefix / s3_region` still honoured
-  as the legacy-fallback route. Removal is Phase 5.
+  as the legacy-fallback route at Phase 2. Removed in Phase 5.
 - UI requires no change: the new response fields (`source_id`,
   `legacy_upload_id`) are ignored by existing clients; the canonical
   `upload_id` round-trips through the status route because the server
@@ -300,7 +300,7 @@ the corpus is entirely new-shape.
 - `document_id` format — stays the raw S3 key so the corpus doesn't
   need a reindex.
 - `knowledge_bases.s3_bucket / s3_prefix / s3_region` columns —
-  retained as the synthetic-fallback input. Removal is Phase 5.
+  retained at Phase 3. Removed in Phase 5 (migration 030).
 - UI — no change; the source-aware upload contract already landed in
   Phase 2 and clients ignore additive fields.
 
@@ -423,6 +423,51 @@ hot-reload workaround.
 11. Managed pilot `3791ba64` (managed_upload) unaffected throughout.
 
 Phase 4 is **done**.
+
+## Phase 5 — shipped (done)
+
+Repo: `agentopia-protocol`. **Status: done (2026-04-20).**
+
+### What shipped
+
+- **`_load_legacy_kb_s3()` deleted.** The function that executed
+  `SELECT s3_bucket, s3_prefix, s3_region FROM knowledge_bases` is gone.
+  No product code reads the legacy columns anymore.
+
+- **`_resolve_storage_ref()` simplified.** The status-route resolver now
+  raises HTTP 404 (`No active managed_upload source for scope '...'`)
+  when `resolve_default_managed_upload()` returns None, instead of falling
+  back to the legacy columns.
+
+- **`_resolve_upload_target()` simplified.** The zero-candidates path now
+  raises HTTP 404 (`scope '...' has no active managed_upload source`).
+  The incomplete-storage-ref fallback also raises HTTP 409 directly rather
+  than chaining to the legacy query.
+
+- **Migration `030_drop_kb_s3_columns.sql` added** to
+  `bot-config-api/db/`. The migration has a precondition guard: it refuses
+  to run if any scope has `s3_*` data but no `active managed_upload` source
+  row. Then it drops `s3_bucket`, `s3_prefix`, `s3_region` from
+  `knowledge_bases` with `IF EXISTS`.
+
+- **Test suite updated.** Legacy-fallback tests deleted and replaced with
+  "no source row → 404" tests. Five migration-030 shape assertions added.
+  54 tests pass (24 control-plane + Phase 5 tests).
+
+### Deployment sequence
+
+1. Deploy updated bot-config-api (code change, zero-downtime).
+2. Apply migration 030 on the live DB.
+3. The precondition check runs first — aborts if any scope would lose
+   ingest capability.
+
+### Qdrant compatibility
+
+Existing chunks written before Phase 5 (without `source_id` payload field)
+remain readable via the scope-level collection filter. No re-ingest is
+required. This is Option A of the Phase 5 compatibility strategy.
+
+Phase 5 is **done**.
 
 ## Pointers
 
