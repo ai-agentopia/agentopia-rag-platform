@@ -16,7 +16,7 @@ five-phase shape is defined in
 | 1 | `knowledge_sources` schema + backfill + read-only control plane + upload-path shim | ✅ Done (2026-04-19) |
 | 2 | Source-aware ingest contract: explicit `?source_id=`, canonical `upload_id` (`source:{id}:{rel_key}`), `legacy_upload_id` compat, ambiguity 409, source `writable`/`is_default` annotations | ✅ Done (2026-04-19) |
 | **3** | Pathway runtime reads `knowledge_sources` at startup, one watcher per active `managed_upload` source, `source_id` in Qdrant payload, legacy chunks readable in-place | ✅ Done (2026-04-20) |
-| 4 | `external_s3` end-to-end (per-source Vault creds, read-only watchers) | ⏳ Not started |
+| 4 | `external_s3` end-to-end (per-source Vault creds, read-only watchers) | ⚠️ Partial (2026-04-20, live E2E proved; watcher teardown gap remains) |
 | 5 | Retire scope-level `knowledge_bases.s3_*` columns | ⏳ Not started |
 
 ## Phase 1 — what actually shipped
@@ -204,7 +204,10 @@ Three PRs landed on `main`:
   — wire `DATABASE_URL` (optional secretKeyRef) into the pathway-
   pipeline Deployment so the runtime can reach `knowledge_sources`.
 
-Live image on the dev cluster: `ghcr.io/ai-agentopia/agentopia-rag-platform:dev-08f603e`.
+Initial rollout image on the dev cluster was
+`ghcr.io/ai-agentopia/agentopia-rag-platform:dev-08f603e`.
+Subsequent ArgoCD Image Updater bumps may change the currently-running
+tag; rely on cluster state for the live image, not this document.
 
 ### Runtime model
 
@@ -291,15 +294,119 @@ the corpus is entirely new-shape.
 
 ### What Phase 3 deliberately does NOT change
 
-- `external_s3` kind — still not runtime-supported; registry skips it.
-  Lives in Phase 4 with per-source Vault credentials and read-only
-  watchers.
+- `external_s3` kind — deferred at Phase-3 ship time. Phase 4 adds the
+  runtime-side `external_s3` watcher model; see the Phase 4 section
+  below for the live state and remaining gap.
 - `document_id` format — stays the raw S3 key so the corpus doesn't
   need a reindex.
 - `knowledge_bases.s3_bucket / s3_prefix / s3_region` columns —
   retained as the synthetic-fallback input. Removal is Phase 5.
 - UI — no change; the source-aware upload contract already landed in
   Phase 2 and clients ignore additive fields.
+
+## Phase 4 — actual shipped state (partial)
+
+Repos: `agentopia-protocol` (bot-config-api control plane),
+`agentopia-rag-platform` (runtime), and `agentopia-infra` (Vault env
+wiring). As of 2026-04-20, Phase 4 is **partially shipped**. The
+control-plane create/deprovision flow, Vault credential contract,
+runtime watcher support for `external_s3`, and one live external-bucket
+E2E proof are all in place. The phase still does **not** close as done
+because runtime reconciliation for source removal is startup-only:
+deprovision retracts indexed chunks and deletes the `knowledge_sources`
+row, but an already-built watcher is not torn down until the Pathway pod
+restarts.
+
+### What has shipped
+
+- **Control-plane create path.**
+  `POST /api/v1/knowledge/{scope}/sources` accepts only
+  `kind='external_s3'`, requires:
+  - `display_name`
+  - `storage_ref.bucket`
+  - `storage_ref.prefix`
+  - `storage_ref.region`
+  - `credential_ref`
+- **Validation and lifecycle.** Create inserts the row as
+  `status='provisioning'`, reads the AWS keypair from Vault, runs
+  `ListObjectsV2` against the target bucket/prefix/region, then flips
+  the row to:
+  - `active` on success
+  - `error` on failure, with a short operator-visible
+    `storage_ref.validation_error`
+- **Credential contract.** `credential_ref` must be a string under:
+  - `secret/data/agentopia/sources/`
+  - `agentopia/sources/`
+  The Vault payload must contain `access_key` and `secret_key`.
+  `credential_ref` is scrubbed from operator responses.
+- **Runtime watcher support.** Pathway now projects active
+  `external_s3` rows from `knowledge_sources`, resolves per-source S3
+  credentials from Vault, and builds a read-only watcher per source.
+  New chunks still carry `scope`, `document_id`, and now also
+  `source_id`.
+- **Real external-bucket proof.** On 2026-04-20 the dev cluster watched
+  a dedicated external bucket (`agentopia-ext-s3-test-phase4`) using a
+  read-only per-source credential from Vault, ingested an externally
+  placed object under `phase4/`, and retrieved the marker content
+  through the live vector-search path. This proved the `external_s3`
+  read path end-to-end against a bucket separate from the managed pilot
+  path.
+- **Deprovision semantics.**
+  `DELETE /api/v1/knowledge/{scope}/sources/{source_id}` sets the row to
+  `deprovisioning`, retracts Qdrant points by `source_id`, then deletes
+  the row. The external bucket is never mutated. Current limitation: the
+  runtime graph is built at startup, so the watcher for a deprovisioned
+  source is not removed until the next Pathway restart.
+
+### Lifecycle boundary for Phase 4
+
+Phase 4's lifecycle surface is intentionally:
+
+- `provisioning`
+- `active`
+- `error`
+- `deprovisioning`
+
+`pause` / `resume` are **not** part of the shipped Phase-4 surface.
+They remain a follow-up lifecycle enhancement, not a prerequisite for
+the external source model itself. The acceptance boundary for this phase
+is therefore:
+
+- create + validate
+- watch + ingest
+- error visibility
+- deprovision without mutating the external bucket
+
+This is still insufficient for `DONE` while watcher teardown remains a
+restart-bound side effect instead of an explicit runtime contract.
+
+### Read-only safety guarantees
+
+- Agentopia never calls `PutObject` or `DeleteObject` on an
+  `external_s3` bucket.
+- Source validation uses `ListObjectsV2` only.
+- Runtime credential resolution is per-source; one broken external
+  source should be skippable without taking down unrelated sources.
+- Vault credential values do not live in Postgres and are not returned
+  by the API.
+
+### What is still missing before Phase 4 can be called done
+
+- **Watcher teardown / runtime reconciliation.** The live proof covered
+  create, validate, watch, external object placement, ingest, retrieval,
+  row deletion, and Qdrant retraction. The remaining gap is runtime
+  teardown: deprovisioned sources are no longer present in
+  `knowledge_sources`, but a watcher that was already part of the
+  running Pathway graph keeps scanning until the pod restarts.
+- **Closeout requirement.** Phase 4 can move from partial to done only
+  once deprovision stops both:
+  - indexed data in Qdrant
+  - active runtime watching of the removed source
+  either through hot-reloadable watcher reconciliation or another
+  explicit runtime restart/reconcile mechanism that is part of the
+  product contract.
+
+Until that gap is closed, Phase 4 remains **partial**.
 
 ## Pointers
 

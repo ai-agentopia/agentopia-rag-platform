@@ -203,3 +203,43 @@ class TestCredentialResolver:
                 assert "secret_key" in str(exc)
             else:
                 raise AssertionError("expected CredentialError")
+
+
+# ── Reconcile contract (watcher teardown via restart) ───────────────────────
+
+
+class TestReconcileContract:
+    """Prove the restart-based watcher teardown model at the registry level.
+
+    When bot-config-api deprovisions a source and triggers a K8s rollout
+    restart, the new pod calls resolve_sources() at startup. These tests
+    prove that deprovisioned (or deleted) sources are excluded from the
+    resulting watcher set — so the restarted pod never rebuilds a watcher
+    for a source that no longer exists.
+    """
+
+    def test_deprovisioning_row_excluded_from_startup_load(self, monkeypatch):
+        """A row at status='deprovisioning' is never loaded at startup."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+        rows = [_external_row(status="deprovisioning")]
+        with patch("psycopg.connect", return_value=_FakeConn(rows)):
+            cfgs = load_active_sources()
+        assert cfgs == []
+
+    def test_deleted_source_absent_from_startup_load(self, monkeypatch):
+        """After a source row is deleted (final deprovision state), the registry returns empty."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+        with patch("psycopg.connect", return_value=_FakeConn([])):
+            cfgs = load_active_sources()
+        assert cfgs == []
+
+    def test_remaining_active_source_survives_after_sibling_deprovision(self, monkeypatch):
+        """The managed_upload pilot keeps appearing even when another source was deprovisioned."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+        from tests.test_source_registry import _managed_row
+        # External source is gone (deprovisioned); only managed_upload remains active.
+        rows = [_managed_row()]
+        with patch("psycopg.connect", return_value=_FakeConn(rows)):
+            cfgs = load_active_sources()
+        assert len(cfgs) == 1
+        assert cfgs[0].kind == "managed_upload"
