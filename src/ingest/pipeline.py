@@ -69,6 +69,13 @@ from dotenv import load_dotenv  # noqa: E402
 
 from ingest.source_registry import SourceConfig, log_source_plan, resolve_sources  # noqa: E402
 from ingest.vault_creds import CredentialError, read_s3_credentials  # noqa: E402
+from ingest.metrics import (  # noqa: E402
+    EVENTS_TOTAL,
+    LAST_EVENT_TIMESTAMP,
+    PIPELINE_ERRORS_TOTAL,
+    SOURCES_ACTIVE,
+    start_metrics_server,
+)
 
 load_dotenv()
 
@@ -299,43 +306,65 @@ class QdrantSink(pw.io.python.ConnectorObserver):
         is_addition: bool,
     ) -> None:
         point_id = self._row_id(key)
-        if is_addition:
-            chunk = _unwrap_chunk_dict(row.get("chunk"))
-            chunk_text = str(chunk.get("text", ""))
-            section = str(chunk.get("section", ""))
-            chunk_index = int(chunk.get("chunk_index", 0))
-            total_chunks = int(chunk.get("total_chunks", 1))
+        try:
+            if is_addition:
+                chunk = _unwrap_chunk_dict(row.get("chunk"))
+                chunk_text = str(chunk.get("text", ""))
+                section = str(chunk.get("section", ""))
+                chunk_index = int(chunk.get("chunk_index", 0))
+                total_chunks = int(chunk.get("total_chunks", 1))
 
-            payload = {
-                "document_id": _unwrap_json(row.get("document_id")),
-                # Canonical scope identity for retrieval filters —
-                # unchanged from Phase 0 so legacy and Phase-3 chunks
-                # co-exist under the same filter.
-                "scope": self._scope_identity,
-                "section_path": _unwrap_json(row.get("section_path")),
-                "section": section,
-                "chunk_index": chunk_index,
-                "total_chunks": total_chunks,
-                "text": chunk_text,
-                "status": "active",
-                "document_hash": hashlib.sha256(chunk_text.encode()).hexdigest(),
-                "ingested_at": _time.time(),
-            }
-            # Phase-3 additive payload field: stable source identity.
-            # Synthetic pilot sources do not have a source_id; the field
-            # is omitted rather than faked so downstream code can tell.
-            if self._source_id:
-                payload["source_id"] = self._source_id
+                payload = {
+                    "document_id": _unwrap_json(row.get("document_id")),
+                    # Canonical scope identity for retrieval filters —
+                    # unchanged from Phase 0 so legacy and Phase-3 chunks
+                    # co-exist under the same filter.
+                    "scope": self._scope_identity,
+                    "section_path": _unwrap_json(row.get("section_path")),
+                    "section": section,
+                    "chunk_index": chunk_index,
+                    "total_chunks": total_chunks,
+                    "text": chunk_text,
+                    "status": "active",
+                    "document_hash": hashlib.sha256(chunk_text.encode()).hexdigest(),
+                    "ingested_at": _time.time(),
+                }
+                # Phase-3 additive payload field: stable source identity.
+                # Synthetic pilot sources do not have a source_id; the field
+                # is omitted rather than faked so downstream code can tell.
+                if self._source_id:
+                    payload["source_id"] = self._source_id
 
-            self._client.upsert(
-                collection_name=self._collection,
-                points=[PointStruct(id=point_id, vector=row["embedding"], payload=payload)],
+                self._client.upsert(
+                    collection_name=self._collection,
+                    points=[PointStruct(id=point_id, vector=row["embedding"], payload=payload)],
+                )
+            else:
+                self._client.delete(
+                    collection_name=self._collection,
+                    points_selector=[point_id],
+                )
+        except Exception as exc:
+            # Qdrant write failed — count the error but do NOT advance success metrics.
+            PIPELINE_ERRORS_TOTAL.labels(error_type="qdrant_error").inc()
+            logger.error(
+                "pipeline: Qdrant write failed scope=%s operation=%s: %s",
+                self._scope_identity, "add" if is_addition else "delete", exc,
             )
-        else:
-            self._client.delete(
-                collection_name=self._collection,
-                points_selector=[point_id],
-            )
+            raise
+
+        # Metrics advance only after confirmed Qdrant persistence.
+        operation = "add" if is_addition else "delete"
+        EVENTS_TOTAL.labels(scope=self._scope_identity, operation=operation).inc()
+        LAST_EVENT_TIMESTAMP.labels(scope=self._scope_identity).set(_time.time())
+
+    def on_error(self, error: BaseException) -> None:
+        # Called by Pathway for framework-level errors (e.g. deserialization failures),
+        # distinct from Qdrant write failures caught in on_change().
+        PIPELINE_ERRORS_TOTAL.labels(error_type="qdrant_error").inc()
+        logger.error(
+            "pipeline: QdrantSink framework error scope=%s: %s", self._scope_identity, error
+        )
 
     def on_end(self) -> None:
         pass
@@ -466,6 +495,7 @@ def build_pipeline(sources: list[SourceConfig] | None = None) -> int:
             # A Vault miss / Vault outage for ONE external_s3 source
             # must not kill unrelated watchers. Log loudly; the next
             # pod restart will retry.
+            PIPELINE_ERRORS_TOTAL.labels(error_type="credential_error").inc()
             logger.error(
                 "pipeline: skipping source_id=%s kind=%s scope=%s — %s",
                 source.source_id, source.kind, source.scope_identity, exc,
@@ -482,6 +512,9 @@ if __name__ == "__main__":
             "Pathway process (would silently do nothing)."
         )
         sys.exit(1)
+
+    SOURCES_ACTIVE.set(count)
+    start_metrics_server()
 
     pw.run(
         persistence_config=pw.persistence.Config(

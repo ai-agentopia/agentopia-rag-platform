@@ -6,3 +6,5 @@ python-dotenv>=1.0.0
 # Phase 3 (ADR-001): the ingest runtime reads the `knowledge_sources`
 # control-plane table from Postgres to pick which S3 sources to watch.
 psycopg[binary]>=3.2
+# Issue #19: Prometheus metrics export
+prometheus-client>=0.21
