@@ -292,20 +292,19 @@ Current pilot state (2026-04-19):
 - API + Vault credential path for `kind='external_s3'`.
 - Read-only watcher; no write routes exposed.
 
-### Phase 5 — retire legacy columns
+### Phase 5 — retire legacy columns ✅ Done (2026-04-20)
 
-- Drop `s3_bucket`, `s3_prefix`, `s3_region` from `knowledge_bases`
-  after all scopes have a populated `knowledge_sources` row and all
-  readers consult the new table.
-- Re-ingest legacy chunks under the new `document_id` format, OR keep
-  the compatibility rule permanently (cheap — no data loss either way).
-
-Compatibility shims during transition:
-
-- `knowledge_bases.s3_*` columns stay alive through Phases 1–3.
-- Ingest route accepts both the legacy form (no source_id) and the
-  future form (with source_id).
-- Qdrant payload `source_id` field is optional until Phase 5.
+- `s3_bucket`, `s3_prefix`, `s3_region` dropped from `knowledge_bases`
+  via migration `030_drop_kb_s3_columns.sql` (with precondition guard).
+- `_load_legacy_kb_s3()` deleted from bot-config-api.
+- `_resolve_storage_ref()` and `_resolve_upload_target()` are now
+  source-row-only; zero active managed_upload sources → HTTP 404.
+- **Option A compatibility strategy chosen**: no global re-ingest.
+  Legacy Qdrant chunks (without `source_id` payload) remain readable
+  via scope-level collection filter indefinitely.
+- `knowledge_sources` is now the **sole source-of-truth** for ingest
+  configuration. The legacy `knowledge_bases.s3_*` columns no longer
+  exist in the schema.
 
 ## What this ADR does NOT decide
 
