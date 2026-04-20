@@ -1,10 +1,36 @@
 name: Eval gate
 
+# Two-tier eval architecture (see issue #21):
+#
+#   Tier 1 — CI gate (this workflow):
+#     - Route correctness: pure-Python scope→collection derivation check.
+#       Always fresh, no live Qdrant needed. Runs on every push/PR/daily.
+#     - nDCG@5 artifact check: reads committed src/eval/results/nDCG-p3-pilot-gate.json
+#       and verifies gate.passed=true. Defense-in-depth: catches a committed failure
+#       result before it ships. NOT the primary nDCG enforcement mechanism.
+#
+#   Tier 2 — In-cluster live eval (agentopia-rag-eval CronJob, weekly Monday 02:00 UTC):
+#     - Runs p3_pilot_gate.py against live Qdrant (unreachable from GitHub runners).
+#     - Pushes agentopia_rag_nDCG_at_5 + agentopia_rag_misroute_rate to Pushgateway.
+#     - Prometheus alert RAGnDCGBelow90 is the primary nDCG quality enforcement.
+#
+# CI gate failures mean:
+#   - Route derivation broken (sha256[:16] mismatch) — any misroute rate > 0, OR
+#   - Committed eval artifact has gate.passed=false (last known live eval failed)
+#
+# Label note: the issue AC used "family"; implementation uses "scope" (same concept —
+# the logical document grouping, e.g. "utop/oddspark"). All Prometheus labels are "scope".
+#
+# Contamination check: deferred to #17 (no automated signal available).
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Daily at 06:00 UTC — catches route derivation regressions between ingest deploys.
+    - cron: "0 6 * * *"
 
 jobs:
   eval-gate:
@@ -20,5 +46,5 @@ jobs:
       - name: Install deps
         run: pip install prometheus-client
 
-      - name: Run eval gate
+      - name: Route correctness + nDCG artifact gate
         run: python src/eval/check_gate.py

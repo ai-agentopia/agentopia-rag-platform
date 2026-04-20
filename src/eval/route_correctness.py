@@ -1,18 +1,25 @@
 """Route correctness check — scope → Qdrant collection name derivation.
 
-Verifies that every known scope identity maps to the expected Qdrant
+Verifies that every known live scope identity maps to the expected Qdrant
 collection name using the canonical sha256[:16] derivation from
 ingest/source_registry._qdrant_collection_for_scope (ADR-011).
 
-A "misroute" is any deviation between expected and actual collection name.
-The misroute rate is 0.0 when all routes are correct — the healthy state.
+A "misroute" is ANY deviation. The threshold is 0: because the derivation
+is deterministic, any mismatch means a breaking change was introduced to
+the hashing algorithm, which would cause retrieval to silently read from the
+wrong collection. The issue #21 AC wrote "> 0.10" but that threshold is
+incorrect for a deterministic property — any non-zero misroute rate is fatal.
+
+Label semantics: metric is per "scope" (e.g. "utop/oddspark"). The original
+issue AC used "family" — that term is not used in the codebase. "scope" is
+the canonical term per ADR-011 and source_registry.py.
 
 Run as:
     python src/eval/route_correctness.py          # exits 0 = all correct
     python src/eval/route_correctness.py --json   # emit JSON result
 
 Used by:
-    - eval-gate.yml CI: inline check on every push/PR
+    - eval-gate.yml CI: inline check on every push/PR + daily schedule
     - emit_metrics.py: push agentopia_rag_misroute_rate to Pushgateway
 """
 

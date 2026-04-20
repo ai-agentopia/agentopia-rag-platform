@@ -1,10 +1,29 @@
-"""CI eval gate — validates committed artifact and route correctness.
+"""CI eval gate — route correctness + committed artifact check.
 
-Reads the committed nDCG@5 result artifact and checks the gate verdict.
-Runs the pure-Python route correctness check (no live Qdrant needed).
-Exits 0 only when both pass. Designed for eval-gate.yml on push/PR.
+Two checks (no live Qdrant required):
 
-Contamination check: explicitly deferred to #17 (no automated signal).
+1. Route correctness (always fresh):
+   Verifies scope→collection derivation via pure Python (sha256[:16]).
+   This is the primary CI enforcement: catches any code change that would
+   break the deterministic routing invariant before it ships.
+   Threshold: misroute_rate > 0 (any misroute = blocking defect).
+
+2. nDCG@5 artifact check (defense-in-depth):
+   Reads committed src/eval/results/nDCG-p3-pilot-gate.json and verifies
+   gate.passed=true. This is NOT the primary nDCG enforcement — the
+   Prometheus alert RAGnDCGBelow90 (fires on CronJob push) is.
+   This check catches a committed failure before it ships on main.
+
+Architecture note (issue #21, PATH B):
+   Live nDCG eval runs weekly via in-cluster CronJob (agentopia-rag-eval),
+   which has direct Qdrant access (unreachable from GitHub-hosted runners).
+   CronJob pushes results to Prometheus Pushgateway for Grafana visibility.
+   CI cannot run live nDCG eval due to private network topology.
+
+Label semantics: "scope" (e.g. "utop/oddspark"). Issue AC used "family" —
+that term does not exist in the codebase. "scope" is canonical (ADR-011).
+
+Contamination check: deferred to #17 (no automated signal available).
 
 Usage:
     python src/eval/check_gate.py
