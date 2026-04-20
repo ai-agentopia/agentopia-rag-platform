@@ -305,52 +305,65 @@ class QdrantSink(pw.io.python.ConnectorObserver):
         time: int,
         is_addition: bool,
     ) -> None:
+        point_id = self._row_id(key)
+        try:
+            if is_addition:
+                chunk = _unwrap_chunk_dict(row.get("chunk"))
+                chunk_text = str(chunk.get("text", ""))
+                section = str(chunk.get("section", ""))
+                chunk_index = int(chunk.get("chunk_index", 0))
+                total_chunks = int(chunk.get("total_chunks", 1))
+
+                payload = {
+                    "document_id": _unwrap_json(row.get("document_id")),
+                    # Canonical scope identity for retrieval filters —
+                    # unchanged from Phase 0 so legacy and Phase-3 chunks
+                    # co-exist under the same filter.
+                    "scope": self._scope_identity,
+                    "section_path": _unwrap_json(row.get("section_path")),
+                    "section": section,
+                    "chunk_index": chunk_index,
+                    "total_chunks": total_chunks,
+                    "text": chunk_text,
+                    "status": "active",
+                    "document_hash": hashlib.sha256(chunk_text.encode()).hexdigest(),
+                    "ingested_at": _time.time(),
+                }
+                # Phase-3 additive payload field: stable source identity.
+                # Synthetic pilot sources do not have a source_id; the field
+                # is omitted rather than faked so downstream code can tell.
+                if self._source_id:
+                    payload["source_id"] = self._source_id
+
+                self._client.upsert(
+                    collection_name=self._collection,
+                    points=[PointStruct(id=point_id, vector=row["embedding"], payload=payload)],
+                )
+            else:
+                self._client.delete(
+                    collection_name=self._collection,
+                    points_selector=[point_id],
+                )
+        except Exception as exc:
+            # Qdrant write failed — count the error but do NOT advance success metrics.
+            PIPELINE_ERRORS_TOTAL.labels(error_type="qdrant_error").inc()
+            logger.error(
+                "pipeline: Qdrant write failed scope=%s operation=%s: %s",
+                self._scope_identity, "add" if is_addition else "delete", exc,
+            )
+            raise
+
+        # Metrics advance only after confirmed Qdrant persistence.
         operation = "add" if is_addition else "delete"
         EVENTS_TOTAL.labels(scope=self._scope_identity, operation=operation).inc()
         LAST_EVENT_TIMESTAMP.labels(scope=self._scope_identity).set(_time.time())
-        point_id = self._row_id(key)
-        if is_addition:
-            chunk = _unwrap_chunk_dict(row.get("chunk"))
-            chunk_text = str(chunk.get("text", ""))
-            section = str(chunk.get("section", ""))
-            chunk_index = int(chunk.get("chunk_index", 0))
-            total_chunks = int(chunk.get("total_chunks", 1))
-
-            payload = {
-                "document_id": _unwrap_json(row.get("document_id")),
-                # Canonical scope identity for retrieval filters —
-                # unchanged from Phase 0 so legacy and Phase-3 chunks
-                # co-exist under the same filter.
-                "scope": self._scope_identity,
-                "section_path": _unwrap_json(row.get("section_path")),
-                "section": section,
-                "chunk_index": chunk_index,
-                "total_chunks": total_chunks,
-                "text": chunk_text,
-                "status": "active",
-                "document_hash": hashlib.sha256(chunk_text.encode()).hexdigest(),
-                "ingested_at": _time.time(),
-            }
-            # Phase-3 additive payload field: stable source identity.
-            # Synthetic pilot sources do not have a source_id; the field
-            # is omitted rather than faked so downstream code can tell.
-            if self._source_id:
-                payload["source_id"] = self._source_id
-
-            self._client.upsert(
-                collection_name=self._collection,
-                points=[PointStruct(id=point_id, vector=row["embedding"], payload=payload)],
-            )
-        else:
-            self._client.delete(
-                collection_name=self._collection,
-                points_selector=[point_id],
-            )
 
     def on_error(self, error: BaseException) -> None:
+        # Called by Pathway for framework-level errors (e.g. deserialization failures),
+        # distinct from Qdrant write failures caught in on_change().
         PIPELINE_ERRORS_TOTAL.labels(error_type="qdrant_error").inc()
         logger.error(
-            "pipeline: QdrantSink error scope=%s: %s", self._scope_identity, error
+            "pipeline: QdrantSink framework error scope=%s: %s", self._scope_identity, error
         )
 
     def on_end(self) -> None:

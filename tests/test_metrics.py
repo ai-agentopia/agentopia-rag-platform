@@ -42,23 +42,32 @@ class _FakePointer:
 _pw.Pointer = _FakePointer
 
 _pw_io = _stub("pathway.io")
+_pw.io = _pw_io  # pw.io attribute must exist for `class Foo(pw.io.python.ConnectorObserver)`
+
 _pw_io_python = _stub("pathway.io.python")
+_pw_io.python = _pw_io_python  # pw.io.python attribute
 
 class _FakeObserver:
     pass
 
 _pw_io_python.ConnectorObserver = _FakeObserver
 _pw_io_s3 = _stub("pathway.io.s3")
+_pw_io.s3 = _pw_io_s3
+_pw_io_python.write = MagicMock()  # pw.io.python.write used in pipeline
+
 _pw_persistence = _stub("pathway.persistence")
 _pw_persistence.Config = MagicMock()
 _pw_persistence.Backend = MagicMock()
+_pw.persistence = _pw_persistence
 
 # openai, qdrant, dotenv
 _stub("openai").OpenAI = MagicMock()
-_stub("qdrant_client").QdrantClient = MagicMock()
-_stub("qdrant_client.models").Distance = MagicMock()
-_stub("qdrant_client.models").PointStruct = MagicMock()
-_stub("qdrant_client.models").VectorParams = MagicMock()
+_qdc = _stub("qdrant_client")
+_qdc.QdrantClient = MagicMock()
+_qdc_models = _stub("qdrant_client.models")
+_qdc_models.Distance = MagicMock()
+_qdc_models.PointStruct = MagicMock()
+_qdc_models.VectorParams = MagicMock()
 _stub("dotenv").load_dotenv = lambda: None
 
 # Set required env vars so pipeline module-level code doesn't crash on import
@@ -226,3 +235,108 @@ class TestStartMetricsServer:
             os.environ.pop("METRICS_PORT", None)
         mock_start.assert_called_once_with(8080)
         assert port == 8080
+
+
+# ---------------------------------------------------------------------------
+# QdrantSink metric timing — M19-C4
+# Verify: success metrics advance ONLY after confirmed Qdrant persistence.
+# ---------------------------------------------------------------------------
+
+class TestQdrantSinkMetricTiming:
+    """Timing correctness: metrics must not advance when Qdrant write fails."""
+
+    def _make_sink(self, mock_client=None):
+        from ingest.pipeline import QdrantSink
+        if mock_client is None:
+            mock_client = MagicMock()
+            mock_client.get_collections.return_value.collections = []
+        sink = QdrantSink.__new__(QdrantSink)
+        sink._client = mock_client
+        sink._collection = "kb-test"
+        sink._scope_identity = "test/timing"
+        sink._source_id = "src-test"
+        return sink
+
+    def _make_row(self):
+        return {
+            "chunk": {"text": "hello", "section": "", "chunk_index": 0, "total_chunks": 1},
+            "document_id": "docs/test.md",
+            "section_path": "docs/test.md",
+            "embedding": [0.1] * 4,
+        }
+
+    def test_successful_add_increments_events_counter(self):
+        sink = self._make_sink()
+        sink._scope_identity = "test/timing-ok-add"
+        before = _counter_value(EVENTS_TOTAL, scope=sink._scope_identity, operation="add")
+        sink.on_change(MagicMock(), self._make_row(), 1, is_addition=True)
+        assert _counter_value(EVENTS_TOTAL, scope=sink._scope_identity, operation="add") == before + 1
+
+    def test_successful_add_sets_timestamp(self):
+        sink = self._make_sink()
+        sink._scope_identity = "test/timing-ok-ts"
+        t_before = _time.time()
+        sink.on_change(MagicMock(), self._make_row(), 1, is_addition=True)
+        assert _gauge_value(LAST_EVENT_TIMESTAMP, scope=sink._scope_identity) >= t_before
+
+    def test_successful_delete_increments_events_counter(self):
+        sink = self._make_sink()
+        sink._scope_identity = "test/timing-ok-del"
+        before = _counter_value(EVENTS_TOTAL, scope=sink._scope_identity, operation="delete")
+        sink.on_change(MagicMock(), self._make_row(), 1, is_addition=False)
+        assert _counter_value(EVENTS_TOTAL, scope=sink._scope_identity, operation="delete") == before + 1
+
+    def test_failed_upsert_increments_error_counter(self):
+        mock_client = MagicMock()
+        mock_client.get_collections.return_value.collections = []
+        mock_client.upsert.side_effect = RuntimeError("qdrant unavailable")
+        sink = self._make_sink(mock_client)
+        sink._scope_identity = "test/timing-fail-add"
+        before_err = _counter_value(PIPELINE_ERRORS_TOTAL, error_type="qdrant_error")
+        with pytest.raises(RuntimeError):
+            sink.on_change(MagicMock(), self._make_row(), 1, is_addition=True)
+        assert _counter_value(PIPELINE_ERRORS_TOTAL, error_type="qdrant_error") == before_err + 1
+
+    def test_failed_upsert_does_not_advance_events_counter(self):
+        mock_client = MagicMock()
+        mock_client.get_collections.return_value.collections = []
+        mock_client.upsert.side_effect = RuntimeError("qdrant unavailable")
+        sink = self._make_sink(mock_client)
+        sink._scope_identity = "test/timing-fail-add-events"
+        before = _counter_value(EVENTS_TOTAL, scope=sink._scope_identity, operation="add")
+        with pytest.raises(RuntimeError):
+            sink.on_change(MagicMock(), self._make_row(), 1, is_addition=True)
+        assert _counter_value(EVENTS_TOTAL, scope=sink._scope_identity, operation="add") == before
+
+    def test_failed_upsert_does_not_advance_timestamp(self):
+        mock_client = MagicMock()
+        mock_client.get_collections.return_value.collections = []
+        mock_client.upsert.side_effect = RuntimeError("qdrant unavailable")
+        sink = self._make_sink(mock_client)
+        sink._scope_identity = "test/timing-fail-ts"
+        LAST_EVENT_TIMESTAMP.labels(scope=sink._scope_identity).set(0.0)
+        with pytest.raises(RuntimeError):
+            sink.on_change(MagicMock(), self._make_row(), 1, is_addition=True)
+        assert _gauge_value(LAST_EVENT_TIMESTAMP, scope=sink._scope_identity) == 0.0
+
+    def test_failed_delete_increments_error_counter(self):
+        mock_client = MagicMock()
+        mock_client.get_collections.return_value.collections = []
+        mock_client.delete.side_effect = RuntimeError("qdrant unavailable")
+        sink = self._make_sink(mock_client)
+        sink._scope_identity = "test/timing-fail-del"
+        before_err = _counter_value(PIPELINE_ERRORS_TOTAL, error_type="qdrant_error")
+        with pytest.raises(RuntimeError):
+            sink.on_change(MagicMock(), self._make_row(), 1, is_addition=False)
+        assert _counter_value(PIPELINE_ERRORS_TOTAL, error_type="qdrant_error") == before_err + 1
+
+    def test_failed_delete_does_not_advance_events_counter(self):
+        mock_client = MagicMock()
+        mock_client.get_collections.return_value.collections = []
+        mock_client.delete.side_effect = RuntimeError("qdrant unavailable")
+        sink = self._make_sink(mock_client)
+        sink._scope_identity = "test/timing-fail-del-events"
+        before = _counter_value(EVENTS_TOTAL, scope=sink._scope_identity, operation="delete")
+        with pytest.raises(RuntimeError):
+            sink.on_change(MagicMock(), self._make_row(), 1, is_addition=False)
+        assert _counter_value(EVENTS_TOTAL, scope=sink._scope_identity, operation="delete") == before
