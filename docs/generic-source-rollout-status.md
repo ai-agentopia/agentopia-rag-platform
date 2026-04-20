@@ -16,7 +16,7 @@ five-phase shape is defined in
 | 1 | `knowledge_sources` schema + backfill + read-only control plane + upload-path shim | ✅ Done (2026-04-19) |
 | 2 | Source-aware ingest contract: explicit `?source_id=`, canonical `upload_id` (`source:{id}:{rel_key}`), `legacy_upload_id` compat, ambiguity 409, source `writable`/`is_default` annotations | ✅ Done (2026-04-19) |
 | **3** | Pathway runtime reads `knowledge_sources` at startup, one watcher per active `managed_upload` source, `source_id` in Qdrant payload, legacy chunks readable in-place | ✅ Done (2026-04-20) |
-| 4 | `external_s3` end-to-end (per-source Vault creds, read-only watchers) | ⚠️ Partial (2026-04-20, live E2E proved; watcher teardown gap remains) |
+| **4** | `external_s3` end-to-end (per-source Vault creds, read-only watchers, automatic watcher teardown on deprovision) | ✅ Done (2026-04-20) |
 | 5 | Retire scope-level `knowledge_bases.s3_*` columns | ⏳ Not started |
 
 ## Phase 1 — what actually shipped
@@ -304,18 +304,15 @@ the corpus is entirely new-shape.
 - UI — no change; the source-aware upload contract already landed in
   Phase 2 and clients ignore additive fields.
 
-## Phase 4 — actual shipped state (partial)
+## Phase 4 — shipped (done)
 
-Repos: `agentopia-protocol` (bot-config-api control plane),
-`agentopia-rag-platform` (runtime), and `agentopia-infra` (Vault env
-wiring). As of 2026-04-20, Phase 4 is **partially shipped**. The
+Repos: `agentopia-protocol` (bot-config-api control plane,
+`agentopia-protocol#449`), `agentopia-rag-platform` (runtime,
+`agentopia-rag-platform#54` + `#55`), and `agentopia-infra` (Vault
+env wiring). As of 2026-04-20, Phase 4 is **fully done**. The
 control-plane create/deprovision flow, Vault credential contract,
-runtime watcher support for `external_s3`, and one live external-bucket
-E2E proof are all in place. The phase still does **not** close as done
-because runtime reconciliation for source removal is startup-only:
-deprovision retracts indexed chunks and deletes the `knowledge_sources`
-row, but an already-built watcher is not torn down until the Pathway pod
-restarts.
+runtime watcher support for `external_s3`, live external-bucket E2E
+proof, and automatic watcher teardown on deprovision are all in place.
 
 ### What has shipped
 
@@ -390,23 +387,42 @@ restart-bound side effect instead of an explicit runtime contract.
 - Vault credential values do not live in Postgres and are not returned
   by the API.
 
-### What is still missing before Phase 4 can be called done
+### Watcher teardown — product contract
 
-- **Watcher teardown / runtime reconciliation.** The live proof covered
-  create, validate, watch, external object placement, ingest, retrieval,
-  row deletion, and Qdrant retraction. The remaining gap is runtime
-  teardown: deprovisioned sources are no longer present in
-  `knowledge_sources`, but a watcher that was already part of the
-  running Pathway graph keeps scanning until the pod restarts.
-- **Closeout requirement.** Phase 4 can move from partial to done only
-  once deprovision stops both:
-  - indexed data in Qdrant
-  - active runtime watching of the removed source
-  either through hot-reloadable watcher reconciliation or another
-  explicit runtime restart/reconcile mechanism that is part of the
-  product contract.
+After a source is deprovisioned, bot-config-api automatically triggers
+a K8s rollout restart of `agentopia-rag-platform`. The new pod calls
+`resolve_sources()` at startup, which queries only `status='active'`
+rows — a deprovisioned (deleted) source is structurally absent. The
+restart is non-blocking; the deprovision API call returns
+`reconcile_triggered: true` once K8s accepts the patch, without waiting
+for the pod to become ready.
 
-Until that gap is closed, Phase 4 remains **partial**.
+This is the explicit, documented product contract for watcher teardown:
+Pathway's dataflow graph is constructed once at process start
+(`pw.run()` is then blocking), so adding or removing a watcher requires
+a pod restart. The controlled restart is the correct mechanism, not a
+hot-reload workaround.
+
+**D4-4 live proof (2026-04-20):**
+
+1. External source `82742fe3` created → `status: active`, Vault-backed
+   `agentopia-ext-s3-reader` credentials validated.
+2. Rag-platform restarted → logs: `loaded 2 active source(s) (1 external_s3, 1 managed_upload)`.
+3. Test file `phase4/d4-4-proof.md` placed out-of-band (customer action,
+   admin account, not Agentopia).
+4. Pathway downloaded file at 04:35:52 UTC; Qdrant confirmed 1 point
+   for `source_id=82742fe3`.
+5. `DELETE /api/v1/knowledge/utop--oddspark/sources/82742fe3` →
+   `{"status": "deprovisioned", "reconcile_triggered": true}`.
+6. Deployment annotation confirmed: `agentopia/reconcile-reason: source-deprovisioned`.
+7. New pod logs: `loaded 1 active source(s) (1 managed_upload)` — external source gone.
+8. Post-deprov file `phase4/post-deprov-test.md` placed in bucket →
+   no Pathway download event, no Qdrant upsert after 70s.
+9. Final Qdrant count for `source_id=82742fe3`: **0**.
+10. Bucket contents intact (both files present, Agentopia made 0 PutObject/DeleteObject calls).
+11. Managed pilot `3791ba64` (managed_upload) unaffected throughout.
+
+Phase 4 is **done**.
 
 ## Pointers
 
