@@ -69,6 +69,13 @@ from dotenv import load_dotenv  # noqa: E402
 
 from ingest.source_registry import SourceConfig, log_source_plan, resolve_sources  # noqa: E402
 from ingest.vault_creds import CredentialError, read_s3_credentials  # noqa: E402
+from ingest.metrics import (  # noqa: E402
+    EVENTS_TOTAL,
+    LAST_EVENT_TIMESTAMP,
+    PIPELINE_ERRORS_TOTAL,
+    SOURCES_ACTIVE,
+    start_metrics_server,
+)
 
 load_dotenv()
 
@@ -298,6 +305,9 @@ class QdrantSink(pw.io.python.ConnectorObserver):
         time: int,
         is_addition: bool,
     ) -> None:
+        operation = "add" if is_addition else "delete"
+        EVENTS_TOTAL.labels(scope=self._scope_identity, operation=operation).inc()
+        LAST_EVENT_TIMESTAMP.labels(scope=self._scope_identity).set(_time.time())
         point_id = self._row_id(key)
         if is_addition:
             chunk = _unwrap_chunk_dict(row.get("chunk"))
@@ -336,6 +346,12 @@ class QdrantSink(pw.io.python.ConnectorObserver):
                 collection_name=self._collection,
                 points_selector=[point_id],
             )
+
+    def on_error(self, error: BaseException) -> None:
+        PIPELINE_ERRORS_TOTAL.labels(error_type="qdrant_error").inc()
+        logger.error(
+            "pipeline: QdrantSink error scope=%s: %s", self._scope_identity, error
+        )
 
     def on_end(self) -> None:
         pass
@@ -466,6 +482,7 @@ def build_pipeline(sources: list[SourceConfig] | None = None) -> int:
             # A Vault miss / Vault outage for ONE external_s3 source
             # must not kill unrelated watchers. Log loudly; the next
             # pod restart will retry.
+            PIPELINE_ERRORS_TOTAL.labels(error_type="credential_error").inc()
             logger.error(
                 "pipeline: skipping source_id=%s kind=%s scope=%s — %s",
                 source.source_id, source.kind, source.scope_identity, exc,
@@ -482,6 +499,9 @@ if __name__ == "__main__":
             "Pathway process (would silently do nothing)."
         )
         sys.exit(1)
+
+    SOURCES_ACTIVE.set(count)
+    start_metrics_server()
 
     pw.run(
         persistence_config=pw.persistence.Config(
