@@ -118,3 +118,11 @@ class TestBytesInput:
         data = "content".encode("utf-8")
         result = extract_text(data, "FILE.MD")
         assert result == "content"
+
+    def test_docx_invalid_bytes_returns_empty_with_warning(self, caplog):
+        # Pathway UDF may deliver bytes that fail docx.Document() — must not crash.
+        # Expected: warning logged, empty string returned.
+        with caplog.at_level(logging.WARNING, logger="text_extract"):
+            result = extract_text(b"not a real docx just raw bytes", "archive.docx")
+        assert result == ""
+        assert "docx extraction failed" in caplog.text
