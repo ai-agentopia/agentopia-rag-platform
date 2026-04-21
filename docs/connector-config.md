@@ -28,11 +28,21 @@ All documents for a scope are stored under `scopes/{client_id}/{scope_name}/`. P
 
 **Pilot scope path**: `s3://agentopia-rag-ingest/scopes/joblogic-kb/api-docs/`
 
-## Document Format (Pilot)
+## Document Format (Round 1 — Pathway-native parsers)
 
-Pilot scope `joblogic-kb/api-docs` contains markdown files only (`.md`). The pipeline uses `format="plaintext_by_object"` for this scope.
+The pipeline reads S3 objects with `format="binary"` and routes bytes to
+official Pathway parsers (`pathway.xpacks.llm.parsers`):
 
-DOCX and binary file support is tracked in ticket #25 — not part of this pilot.
+| Extension | Parser | Chunking |
+|---|---|---|
+| `.pdf` (text-based) | `PypdfParser` | one page per parsed element |
+| `.docx`, `.html`, `.txt`, `.md` | `UnstructuredParser(chunking_mode="single")` | one element per file; downstream `chunk_text()` applies header-aware splitting for MD, fixed-window fallback for others |
+
+The former markdown-only / `plaintext_by_object` pilot path is retired.
+The former custom `text_extract.py` UDF is retired. Scanned / image PDFs
+and unsupported types (`.xlsx`, `.pptx`, images, archives) are NOT
+handled by this pipeline in Round 1 — they are rejected at the upload
+boundary in bot-config-api (415 Unsupported Media Type).
 
 ## Credentials (K8s Secrets)
 

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+spike/.venv/
+spike/.venv_*/
+spike/output/

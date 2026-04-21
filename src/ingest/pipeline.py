@@ -62,13 +62,13 @@ if _SRC_ROOT not in sys.path:
 
 import pathway as pw  # noqa: E402
 from openai import OpenAI  # noqa: E402
+from pathway.xpacks.llm.parsers import PypdfParser, UnstructuredParser  # noqa: E402
 from qdrant_client import QdrantClient  # noqa: E402
 from qdrant_client.models import Distance, PointStruct, VectorParams  # noqa: E402
 
 from dotenv import load_dotenv  # noqa: E402
 
 from ingest.source_registry import SourceConfig, log_source_plan, resolve_sources  # noqa: E402
-from ingest.text_extract import extract_text as _extract_text_fn  # noqa: E402
 from ingest.vault_creds import CredentialError, read_s3_credentials  # noqa: E402
 from ingest.metrics import (  # noqa: E402
     EVENTS_TOTAL,
@@ -188,7 +188,35 @@ def _chunk_markdown(text: str) -> list:
     return chunks
 
 
-extract_text = pw.udf(_extract_text_fn)
+# ---------------------------------------------------------------------------
+# Official Pathway parsers (Round 1 integration)
+# ---------------------------------------------------------------------------
+# Replaces the former custom `extract_text()` UDF. Two parsers dispatched
+# by file extension:
+#   - PypdfParser:        PDF — one tuple per page, pure-Python pypdf
+#   - UnstructuredParser: DOCX / HTML / TXT / MD (and anything else) —
+#     one tuple per file via chunking_mode="single"; downstream
+#     chunk_text() then applies header-aware / fixed-window splitting
+#     unchanged from Phase 0.
+#
+# Both return `list[tuple[str, dict]]` per the v0.30.0 parsers.py contract.
+# Module-level instances are safe: both classes are pw.udf wrappers.
+
+_unstructured_parser = UnstructuredParser(chunking_mode="single")
+_pdf_parser = PypdfParser()
+
+
+@pw.udf
+def _element_text(element) -> str:
+    """Extract the text field from a (text, metadata) parser output tuple.
+
+    Pathway flatten() emits the tuple as-is; both parsers guarantee
+    shape `(str, dict)`. Defensive fallback for anything else keeps
+    the pipeline from crashing on a malformed row.
+    """
+    if isinstance(element, (list, tuple)) and len(element) >= 1:
+        return str(element[0])
+    return str(element)
 
 
 @pw.udf
@@ -428,7 +456,13 @@ def _build_source_subgraph(source: SourceConfig) -> None:
 
     access_key, secret_key = _resolve_source_s3_credentials(source)
 
-    documents = pw.io.s3.read(
+    # Round 1: Pathway-native parser path.
+    # Connector reads raw bytes (per S3 docstring, `format="binary"` puts
+    # bytes in column `data`). Parsers consume `data`; their output shape
+    # is list[tuple[str, dict]] which flatten() splits into one row per
+    # element. For UnstructuredParser(chunking_mode="single") that is one
+    # element per file; for PypdfParser it is one element per page.
+    documents_raw = pw.io.s3.read(
         source.prefix,
         aws_s3_settings=pw.io.s3.AwsS3Settings(
             bucket_name=source.bucket,
@@ -442,10 +476,34 @@ def _build_source_subgraph(source: SourceConfig) -> None:
         autocommit_duration_ms=POLL_INTERVAL * 1000,
     )
 
-    documents = documents.select(
-        text=extract_text(pw.this.data, pw.this._metadata["path"]),
+    # Dispatch: PDFs through PypdfParser (no model load, pure pypdf);
+    # everything else through UnstructuredParser. Extension-based split
+    # is cheap and deterministic; the same file never goes through both.
+    pdf_docs = documents_raw.filter(pw.this._metadata["path"].str.endswith(".pdf"))
+    other_docs = documents_raw.filter(~pw.this._metadata["path"].str.endswith(".pdf"))
+
+    pdf_parsed = pdf_docs.select(
+        elements=_pdf_parser(pw.this.data),
         document_id=pw.this._metadata["path"],
         section_path=pw.this._metadata["path"],
+    )
+    other_parsed = other_docs.select(
+        elements=_unstructured_parser(pw.this.data),
+        document_id=pw.this._metadata["path"],
+        section_path=pw.this._metadata["path"],
+    )
+    all_parsed = pdf_parsed.concat_reindex(other_parsed)
+
+    # Flatten parser output: one row per (text, metadata) tuple.
+    elements_flat = all_parsed.flatten(pw.this.elements).select(
+        element=pw.this.elements,
+        document_id=pw.this.document_id,
+        section_path=pw.this.section_path,
+    )
+    documents = elements_flat.select(
+        text=_element_text(pw.this.element),
+        document_id=pw.this.document_id,
+        section_path=pw.this.section_path,
     )
 
     documents_with_chunks = documents.select(
