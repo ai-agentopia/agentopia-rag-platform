@@ -207,6 +207,19 @@ _pdf_parser = PypdfParser()
 
 
 @pw.udf
+def _is_pdf(path_meta) -> bool:
+    """True when the source path ends with `.pdf` (case-insensitive).
+
+    Takes the `_metadata["path"]` Json column — which resolves to
+    `str | None` depending on the upstream connector — and converts it
+    to a bool. Pathway's native `str.endswith` operator requires a
+    non-nullable string column, so a UDF is used instead.
+    """
+    p = "" if path_meta is None else str(path_meta)
+    return p.lower().endswith(".pdf")
+
+
+@pw.udf
 def _element_text(element) -> str:
     """Extract the text field from a (text, metadata) parser output tuple.
 
@@ -479,8 +492,15 @@ def _build_source_subgraph(source: SourceConfig) -> None:
     # Dispatch: PDFs through PypdfParser (no model load, pure pypdf);
     # everything else through UnstructuredParser. Extension-based split
     # is cheap and deterministic; the same file never goes through both.
-    pdf_docs = documents_raw.filter(pw.this._metadata["path"].str.endswith(".pdf"))
-    other_docs = documents_raw.filter(~pw.this._metadata["path"].str.endswith(".pdf"))
+    # Split PDF from the rest via UDF (Pathway's native str.endswith won't
+    # accept a nullable str column; Json→str conversion returns str | None).
+    classified = documents_raw.select(
+        data=pw.this.data,
+        _metadata=pw.this._metadata,
+        _is_pdf=_is_pdf(pw.this._metadata["path"]),
+    )
+    pdf_docs = classified.filter(classified._is_pdf)
+    other_docs = classified.filter(~classified._is_pdf)
 
     pdf_parsed = pdf_docs.select(
         elements=_pdf_parser(pw.this.data),
