@@ -68,6 +68,7 @@ from qdrant_client.models import Distance, PointStruct, VectorParams  # noqa: E4
 from dotenv import load_dotenv  # noqa: E402
 
 from ingest.source_registry import SourceConfig, log_source_plan, resolve_sources  # noqa: E402
+from ingest.text_extract import extract_text as _extract_text_fn  # noqa: E402
 from ingest.vault_creds import CredentialError, read_s3_credentials  # noqa: E402
 from ingest.metrics import (  # noqa: E402
     EVENTS_TOTAL,
@@ -185,6 +186,9 @@ def _chunk_markdown(text: str) -> list:
         chunk["chunk_index"] = i
         chunk["total_chunks"] = total
     return chunks
+
+
+extract_text = pw.udf(_extract_text_fn)
 
 
 @pw.udf
@@ -432,14 +436,14 @@ def _build_source_subgraph(source: SourceConfig) -> None:
             access_key=access_key,
             secret_access_key=secret_key,
         ),
-        format="plaintext_by_object",
+        format="binary",
         mode="streaming",
         with_metadata=True,
         autocommit_duration_ms=POLL_INTERVAL * 1000,
     )
 
     documents = documents.select(
-        text=pw.this.data,
+        text=extract_text(pw.this.data, pw.this._metadata["path"]),
         document_id=pw.this._metadata["path"],
         section_path=pw.this._metadata["path"],
     )

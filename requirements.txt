@@ -8,3 +8,5 @@ python-dotenv>=1.0.0
 psycopg[binary]>=3.2
 # Issue #19: Prometheus metrics export
 prometheus-client>=0.21
+# Issue #25: DOCX text extraction
+python-docx>=1.0.0
