@@ -59,6 +59,58 @@ Rationale: Pathway replaces the orchestrator/normalizer entirely; no value in po
 
 ---
 
+## P4.6 Legacy Freeze Declaration
+
+> **Date:** 2026-04-21  
+> **Issue:** [rag-platform#16](https://github.com/ai-agentopia/agentopia-rag-platform/issues/16) — CLOSED  
+> **Authority:** agentopia-rag-platform team (formal declaration; CTO sign-off on sequencing 2026-04-17)
+
+### Declaration
+
+Pathway is the sole active ingest path for all registered scopes.  
+No competing legacy ingest process is running or expected to restart.  
+`agentopia-knowledge-ingest` normalizer and orchestrator are declared inactive as of this date.
+
+### Verification Evidence
+
+**Pod audit (2026-04-21, `agentopia-dev`):**
+
+| Pod | Image | Role |
+|---|---|---|
+| `agentopia-rag-platform-67d5db6cb8-5gjl8` | `ghcr.io/ai-agentopia/agentopia-rag-platform:dev-993d8e4` | Pathway ingest — sole ingest runtime |
+
+No legacy ingest pod (`agentopia-knowledge-ingest` or equivalent) found in `agentopia-dev` or any other namespace.
+
+**nDCG@5 confirmation:**
+
+| Scope | nDCG@5 | Bar | Status |
+|---|---|---|---|
+| utop/oddspark | 0.9184 | ≥ 0.90 | ✓ |
+
+Source: live weekly eval CronJob (`agentopia-rag-eval`), run 2026-04-20. Committed artifact: `src/eval/results/nDCG-p3-pilot-gate.json` (0.941, 2026-04-18).
+
+### What this declaration does and does not do
+
+| In scope | Out of scope |
+|---|---|
+| Formal recording that Pathway is sole ingest path | Code deletion of `agentopia-knowledge-ingest` |
+| Starting the 30-day hold clock | Serving-path migration (not yet started) |
+| Unblocking issue #22 (rollback drill) | Executing the rollback drill itself |
+| Confirming nDCG ≥ 0.90 at freeze point | Promising nDCG improvement |
+
+Code removal (archiving `agentopia-knowledge-ingest`) requires the rollback drill in issue #22 to pass first.
+
+### 30-Day Hold
+
+| Date | Event |
+|---|---|
+| **2026-04-21** | P4.6 freeze declared — hold-start date |
+| **2026-05-21** | Hold complete — issue #22 (rollback drill) becomes schedulable |
+
+Issue #22 must not execute before 2026-05-21.
+
+---
+
 ## Definitions
 
 | Term | Definition |
