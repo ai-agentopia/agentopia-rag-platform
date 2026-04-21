@@ -200,7 +200,7 @@ def chunk_text(text: str) -> list:
             text = d if isinstance(d, str) else s
         except (json.JSONDecodeError, ValueError):
             text = str(text)
-    return _chunk_markdown(text)
+    return [c for c in _chunk_markdown(text) if c.get("text", "").strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +436,7 @@ def _build_source_subgraph(source: SourceConfig) -> None:
             access_key=access_key,
             secret_access_key=secret_key,
         ),
-        format="binary",
+        format="plaintext_by_object",
         mode="streaming",
         with_metadata=True,
         autocommit_duration_ms=POLL_INTERVAL * 1000,
