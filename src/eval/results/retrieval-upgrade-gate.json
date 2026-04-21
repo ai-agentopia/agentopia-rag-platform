@@ -1,0 +1,59 @@
+{
+  "gate": "retrieval_upgrade",
+  "timestamp": "20260420T142233Z",
+  "scope": "utop/oddspark",
+  "collection": "kb-45294aa854667d3b",
+  "dataset": "src/eval/datasets/p3_pilot_gate.json",
+  "k": 5,
+  "sample_count": 10,
+  "delta_threshold_pct": 3.0,
+  "baseline": {
+    "strategy": "dense-only",
+    "mean_ndcg": 0.9184,
+    "per_query": [
+      {"id": "p3-01", "ndcg": 1.0},
+      {"id": "p3-02", "ndcg": 0.9557},
+      {"id": "p3-03", "ndcg": 1.0},
+      {"id": "p3-04", "ndcg": 0.9106},
+      {"id": "p3-05", "ndcg": 1.0},
+      {"id": "p3-06", "ndcg": 0.6934},
+      {"id": "p3-07", "ndcg": 1.0},
+      {"id": "p3-08", "ndcg": 1.0},
+      {"id": "p3-09", "ndcg": 1.0},
+      {"id": "p3-10", "ndcg": 0.8503}
+    ]
+  },
+  "candidates": {
+    "W2": {
+      "candidate": "W2",
+      "status": "prerequisite_failed",
+      "reason": "Collection has no sparse vector index (sparse_vectors=None). BM25 hybrid retrieval requires sparse vectors configured at ingestion time. Qdrant v1.16.1 supports sparse vectors at server level, but the collection was not created with a sparse index. Re-indexing the full corpus would be required to enable W2.",
+      "qdrant_version_ok": true,
+      "sparse_index_present": false,
+      "verdict": "not_authorized"
+    },
+    "W4": {
+      "candidate": "W4",
+      "strategy": "cross-encoder reranking (ms-marco-MiniLM-L-6-v2)",
+      "retrieve_n": 20,
+      "k": 5,
+      "mean_ndcg": 0.9131,
+      "delta": -0.0053,
+      "delta_pct": -0.58,
+      "authorized": false,
+      "per_query": [
+        {"id": "p3-01", "ndcg": 1.0},
+        {"id": "p3-02", "ndcg": 1.0},
+        {"id": "p3-03", "ndcg": 1.0},
+        {"id": "p3-04", "ndcg": 0.8772},
+        {"id": "p3-05", "ndcg": 0.9197},
+        {"id": "p3-06", "ndcg": 1.0},
+        {"id": "p3-07", "ndcg": 1.0},
+        {"id": "p3-08", "ndcg": 1.0},
+        {"id": "p3-09", "ndcg": 0.9469},
+        {"id": "p3-10", "ndcg": 0.3869}
+      ]
+    }
+  },
+  "verdict": "not_authorized"
+}
