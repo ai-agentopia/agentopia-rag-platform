@@ -220,28 +220,6 @@ def _is_pdf(path_meta) -> bool:
 
 
 @pw.udf
-def _as_bytes(data) -> bytes:
-    """Guarantee bytes at the parser boundary.
-
-    `pw.io.s3.read(format="binary")` is documented to produce a `data: bytes`
-    column (`parse_utf8=False` internally). On dev we observed the column
-    arriving as `str` at the Pathway UDF boundary — the parser crashes
-    with `TypeError: a bytes-like object is required, not 'str'` inside
-    `BytesIO(contents)`.
-
-    This guard coerces to bytes. `latin-1` is used for str→bytes because
-    it is a lossless 1:1 mapping of every byte 0..255; if Pathway's
-    Rust engine preserved the raw byte values through a str handle
-    (no UTF-8 decode), latin-1 encode recovers them exactly.
-    """
-    if isinstance(data, bytes):
-        return data
-    if isinstance(data, str):
-        return data.encode("latin-1", errors="replace")
-    return bytes(data)
-
-
-@pw.udf
 def _element_text(element) -> str:
     """Extract the text field from a (text, metadata) parser output tuple.
 
@@ -505,7 +483,7 @@ def _build_source_subgraph(source: SourceConfig) -> None:
             access_key=access_key,
             secret_access_key=secret_key,
         ),
-        format="plaintext_by_object",
+        format="binary",
         mode="streaming",
         with_metadata=True,
         autocommit_duration_ms=POLL_INTERVAL * 1000,
@@ -525,12 +503,12 @@ def _build_source_subgraph(source: SourceConfig) -> None:
     other_docs = classified.filter(~classified._is_pdf)
 
     pdf_parsed = pdf_docs.select(
-        elements=_pdf_parser(_as_bytes(pw.this.data)),
+        elements=_pdf_parser(pw.this.data),
         document_id=pw.this._metadata["path"],
         section_path=pw.this._metadata["path"],
     )
     other_parsed = other_docs.select(
-        elements=_unstructured_parser(_as_bytes(pw.this.data)),
+        elements=_unstructured_parser(pw.this.data),
         document_id=pw.this._metadata["path"],
         section_path=pw.this._metadata["path"],
     )
