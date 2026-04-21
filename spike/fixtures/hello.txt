@@ -1,0 +1,2 @@
+TXT sentinel delta-plaintext passthrough.
+Second line of plain text.
