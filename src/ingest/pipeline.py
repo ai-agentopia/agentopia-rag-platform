@@ -483,7 +483,7 @@ def _build_source_subgraph(source: SourceConfig) -> None:
             access_key=access_key,
             secret_access_key=secret_key,
         ),
-        format="binary",
+        format="plaintext_by_object",
         mode="streaming",
         with_metadata=True,
         autocommit_duration_ms=POLL_INTERVAL * 1000,
