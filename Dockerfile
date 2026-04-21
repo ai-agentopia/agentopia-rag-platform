@@ -7,8 +7,15 @@ WORKDIR /app
 #   unstructured.partition.auto). Missing this raises
 #   FileFormatOrDependencyError at parse time.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libmagic1 \
+    && apt-get install -y --no-install-recommends \
+        libmagic1 \
+        libgl1 \
+        libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
+# libgl1 + libglib2.0-0: required at import time by cv2 (pulled in by
+# unstructured_inference, which unstructured.partition.auto imports
+# eagerly). Without them, any partition call on a binary doc raises
+# `ImportError: libGL.so.1: cannot open shared object file`.
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
